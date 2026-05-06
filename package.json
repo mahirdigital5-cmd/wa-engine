@@ -1,0 +1,16 @@
+{
+  "name": "wa-engine",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "express": "^4.19.2",
+    "pino": "^9.3.2",
+    "qrcode": "^1.5.4",
+    "@supabase/supabase-js": "^2.49.8"
+  }
+}
