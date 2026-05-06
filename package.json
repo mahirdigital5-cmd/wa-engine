@@ -7,10 +7,11 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@supabase/supabase-js": "^2.49.8",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "express": "^4.19.2",
     "pino": "^9.3.2",
-    "qrcode": "^1.5.4",
-    "@supabase/supabase-js": "^2.49.8"
+    "qrcode": "^1.5.4"
   }
 }
