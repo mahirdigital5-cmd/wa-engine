@@ -10,18 +10,24 @@ async function startBot() {
 
   const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true,
+    printQRInTerminal: false,
   });
+
+  if (!sock.authState.creds.registered) {
+    const phoneNumber = process.env.WA_NUMBER;
+    const code = await sock.requestPairingCode(phoneNumber);
+
+    console.log("=================================");
+    console.log("PAIRING CODE:", code);
+    console.log("Masukkan kode ini di WhatsApp");
+    console.log("Perangkat tertaut → Tautkan dengan nomor");
+    console.log("=================================");
+  }
 
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      console.log("SCAN QR INI DI WHATSAPP");
-      console.log(qr);
-    }
+    const { connection, lastDisconnect } = update;
 
     if (connection === "close") {
       const shouldReconnect =
@@ -43,7 +49,7 @@ async function startBot() {
   sock.ev.on("messages.upsert", async ({ messages }) => {
     const msg = messages[0];
 
-    if (!msg.message) return;
+    if (!msg.message || msg.key.fromMe) return;
 
     const text =
       msg.message.conversation ||
