@@ -13,6 +13,8 @@ const app = express();
 
 let latestQR = null;
 
+const TRIGGER_API = "https://chat-bot-nexis.vercel.app/api/triggers";
+
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState("session");
 
@@ -71,13 +73,27 @@ async function startBot() {
 
       console.log("PESAN MASUK:", text);
 
-      await sock.sendMessage(msg.key.remoteJid, {
-        text: `Halo, saya ChatBotNexis 🤖
+      const res = await fetch(TRIGGER_API);
+      const triggers = await res.json();
 
-Kamu bilang:
-${text}`,
+      const found = triggers.find((t) => {
+        if (!t.is_active) return false;
+
+        return text
+          .toLowerCase()
+          .includes(t.keyword.toLowerCase());
       });
 
+      if (!found) {
+        console.log("TRIGGER TIDAK DITEMUKAN");
+        return;
+      }
+
+      await sock.sendMessage(msg.key.remoteJid, {
+        text: found.response,
+      });
+
+      console.log("BALASAN DIKIRIM:", found.response);
     } catch (err) {
       console.log("ERROR:", err);
     }
@@ -85,12 +101,12 @@ ${text}`,
 }
 
 app.get("/", (req, res) => {
-  res.send("ChatBotNexis Aktif 🚀");
+  res.send("ChatBotNexis WA Engine Aktif");
 });
 
 app.get("/qr", (req, res) => {
   if (!latestQR) {
-    return res.send("QR belum siap. Refresh lagi.");
+    return res.send("QR belum siap atau WhatsApp sudah terhubung.");
   }
 
   res.send(`
