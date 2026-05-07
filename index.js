@@ -23,7 +23,7 @@ async function startBot() {
     auth: state,
     printQRInTerminal: true,
     logger: P({ level: "silent" }),
-    browser: ["Railway Bot", "Chrome", "1.0.0"],
+    browser: ["ChatBotNexis", "Chrome", "1.0.0"],
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -31,7 +31,7 @@ async function startBot() {
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    console.log("UPDATE:", update);
+    console.log(update);
 
     if (qr) {
       latestQR = await QRCode.toDataURL(qr);
@@ -40,6 +40,7 @@ async function startBot() {
 
     if (connection === "open") {
       console.log("WHATSAPP TERHUBUNG");
+      latestQR = null;
     }
 
     if (connection === "close") {
@@ -54,15 +55,39 @@ async function startBot() {
       }
     }
   });
+
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (type !== "notify") return;
+
+    const msg = messages[0];
+
+    if (!msg.message) return;
+    if (msg.key.fromMe) return;
+
+    const text =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text;
+
+    if (!text) return;
+
+    console.log("PESAN:", text);
+
+    await sock.sendMessage(msg.key.remoteJid, {
+      text: `Halo, saya ChatBotNexis 🤖
+
+Pesan kamu:
+${text}`,
+    });
+  });
 }
 
 app.get("/", (req, res) => {
-  res.send("WA ENGINE AKTIF");
+  res.send("ChatBotNexis Aktif 🚀");
 });
 
 app.get("/qr", (req, res) => {
   if (!latestQR) {
-    return res.send("QR belum siap. Tunggu 10 detik lalu refresh.");
+    return res.send("QR belum siap. Refresh lagi.");
   }
 
   res.send(`
