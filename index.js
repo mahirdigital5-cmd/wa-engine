@@ -2,6 +2,7 @@ import express from "express";
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
+  fetchLatestBaileysVersion,
 } from "@whiskeysockets/baileys";
 
 import P from "pino";
@@ -10,14 +11,19 @@ import { Boom } from "@hapi/boom";
 
 const app = express();
 
-let latestQR = "BELUM ADA QR";
+let latestQR = null;
 
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState("session");
 
+  const { version } = await fetchLatestBaileysVersion();
+
   const sock = makeWASocket({
+    version,
     auth: state,
+    printQRInTerminal: true,
     logger: P({ level: "silent" }),
+    browser: ["Railway Bot", "Chrome", "1.0.0"],
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -25,9 +31,11 @@ async function startBot() {
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
+    console.log("UPDATE:", update);
+
     if (qr) {
       latestQR = await QRCode.toDataURL(qr);
-      console.log("QR BARU BERHASIL DIGENERATE");
+      console.log("QR BERHASIL DIGENERATE");
     }
 
     if (connection === "open") {
@@ -39,31 +47,11 @@ async function startBot() {
         new Boom(lastDisconnect?.error)?.output?.statusCode !==
         DisconnectReason.loggedOut;
 
-      console.log("Koneksi putus");
+      console.log("KONEKSI PUTUS");
 
       if (shouldReconnect) {
         startBot();
       }
-    }
-  });
-
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
-
-    if (!msg.message) return;
-
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text;
-
-    if (!text) return;
-
-    console.log("Pesan:", text);
-
-    if (text.toLowerCase().includes("halo")) {
-      await sock.sendMessage(msg.key.remoteJid, {
-        text: "Halo juga kak 👋",
-      });
     }
   });
 }
@@ -73,13 +61,17 @@ app.get("/", (req, res) => {
 });
 
 app.get("/qr", (req, res) => {
-  if (latestQR === "BELUM ADA QR") {
-    return res.send("QR belum siap, refresh lagi 5 detik.");
+  if (!latestQR) {
+    return res.send("QR belum siap. Tunggu 10 detik lalu refresh.");
   }
 
   res.send(`
-    <h1>Scan QR WhatsApp</h1>
-    <img src="${latestQR}" />
+    <html>
+      <body style="text-align:center;font-family:sans-serif">
+        <h1>SCAN QR WHATSAPP</h1>
+        <img src="${latestQR}" />
+      </body>
+    </html>
   `);
 });
 
