@@ -31,7 +31,7 @@ async function startBot() {
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    console.log(update);
+    console.log("UPDATE:", update);
 
     if (qr) {
       latestQR = await QRCode.toDataURL(qr);
@@ -56,28 +56,31 @@ async function startBot() {
     }
   });
 
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
+  sock.ev.on("messages.upsert", async (m) => {
+    try {
+      const msg = m.messages[0];
 
-    const msg = messages[0];
+      if (!msg.message) return;
+      if (msg.key.fromMe) return;
 
-    if (!msg.message) return;
-    if (msg.key.fromMe) return;
+      const text =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text;
 
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text;
+      if (!text) return;
 
-    if (!text) return;
+      console.log("PESAN MASUK:", text);
 
-    console.log("PESAN:", text);
+      await sock.sendMessage(msg.key.remoteJid, {
+        text: `Halo, saya ChatBotNexis 🤖
 
-    await sock.sendMessage(msg.key.remoteJid, {
-      text: `Halo, saya ChatBotNexis 🤖
-
-Pesan kamu:
+Kamu bilang:
 ${text}`,
-    });
+      });
+
+    } catch (err) {
+      console.log("ERROR:", err);
+    }
   });
 }
 
