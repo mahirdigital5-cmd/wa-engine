@@ -90,12 +90,8 @@ async function startBot() {
       }
 
       if (found.image) {
-        const response = await fetch(found.image.trim());
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-
         await sock.sendMessage(msg.key.remoteJid, {
-          image: buffer,
+          image: { url: found.image.trim() },
           caption: found.response || "",
         });
 
