@@ -89,29 +89,24 @@ async function startBot() {
         return;
       }
 
-      // =========================
-      // KIRIM GAMBAR ATAU TEXT
-      // =========================
-
       if (found.image) {
-  const response = await fetch(found.image);
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
+        const response = await fetch(found.image.trim());
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
 
-  await sock.sendMessage(msg.key.remoteJid, {
-    image: buffer,
-    caption: found.response || "",
-  });
+        await sock.sendMessage(msg.key.remoteJid, {
+          image: buffer,
+          caption: found.response || "",
+        });
 
-  console.log("GAMBAR DIKIRIM:", found.image);
-} else {
-  await sock.sendMessage(msg.key.remoteJid, {
-    text: found.response,
-  });
+        console.log("GAMBAR DIKIRIM:", found.image);
+      } else {
+        await sock.sendMessage(msg.key.remoteJid, {
+          text: found.response,
+        });
 
-  console.log("BALASAN DIKIRIM:", found.response);
-}
-
+        console.log("BALASAN DIKIRIM:", found.response);
+      }
     } catch (err) {
       console.log("ERROR:", err);
     }
