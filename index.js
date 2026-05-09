@@ -100,12 +100,33 @@ console.log("TRIGGER KETEMU:", found);
       if (found.image) {
   const imageUrl = found.image.trim();
 
-  await sock.sendMessage(msg.key.remoteJid, {
-    image: { url: imageUrl },
-    caption: found.response || " ",
+  console.log("MULAI AMBIL GAMBAR:", imageUrl);
+
+  const imageRes = await fetch(imageUrl, {
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+    },
   });
 
-  console.log("GAMBAR DIKIRIM:", imageUrl);
+  console.log("STATUS GAMBAR:", imageRes.status);
+  console.log("TIPE GAMBAR:", imageRes.headers.get("content-type"));
+
+  if (!imageRes.ok) {
+    throw new Error("Gagal ambil gambar dari URL");
+  }
+
+  const imageBuffer = Buffer.from(await imageRes.arrayBuffer());
+
+  console.log("UKURAN GAMBAR:", imageBuffer.length);
+
+  await sock.sendMessage(msg.key.remoteJid, {
+    image: imageBuffer,
+    caption: found.response || " ",
+    mimetype: imageRes.headers.get("content-type") || "image/png",
+    fileName: "gambar.png",
+  });
+
+  console.log("GAMBAR BERHASIL DIKIRIM");
 } else {
         await sock.sendMessage(msg.key.remoteJid, {
           text: found.response,
