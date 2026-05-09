@@ -1,6 +1,3 @@
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import express from "express";
 import makeWASocket, {
   DisconnectReason,
@@ -13,16 +10,21 @@ import QRCode from "qrcode";
 import { Boom } from "@hapi/boom";
 
 const app = express();
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 let latestQR = null;
 
 const TRIGGER_API = "https://chat-bot-nexis.vercel.app/api/triggers";
 
+function normalizeText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[?.,!]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState("session");
-
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
@@ -80,56 +82,70 @@ async function startBot() {
 
       const res = await fetch(TRIGGER_API);
       const triggers = await res.json();
+
       console.log("TRIGGERS DARI API:", triggers);
 
-      const found = triggers.find((t) => {
-  if (!t.active) return false;
+      const incomingText = normalizeText(text);
 
-  const incomingText = text
-  .toLowerCase()
-  .replace(/\s+/g, " ")
-  .replace(/\?/g, "")
-  .trim();
+      // 1. Cari trigger Sama Persis dulu
+      let found = triggers.find((t) => {
+        if (!t.active) return false;
+        if (t.type !== "Sama Persis") return false;
 
-const keyword = t.keyword
-  .toLowerCase()
-  .replace(/\s+/g, " ")
-  .replace(/\?/g, "")
-  .trim();
+        return incomingText === normalizeText(t.keyword);
+      });
 
-  if (t.type === "Sama Persis") {
-    return incomingText === keyword;
-  }
+      // 2. Kalau tidak ada, cari Mengandung pola/frasa lengkap
+      if (!found) {
+        found = triggers.find((t) => {
+          if (!t.active) return false;
+          if (t.type === "Sama Persis") return false;
 
-  return incomingText.includes(keyword);
-});
+          const keyword = normalizeText(t.keyword);
+          return incomingText.includes(keyword);
+        });
+      }
+
+      // 3. Kalau tidak ada juga, cari Mengandung salah satu kata
+      if (!found) {
+        found = triggers.find((t) => {
+          if (!t.active) return false;
+          if (t.type === "Sama Persis") return false;
+
+          const keyword = normalizeText(t.keyword);
+          const words = keyword.split(" ").filter(Boolean);
+
+          return words.some((word) => incomingText.includes(word));
+        });
+      }
 
       if (!found) {
-  console.log("TRIGGER TIDAK DITEMUKAN UNTUK PESAN:", text);
-  return;
-}
+        console.log("TRIGGER TIDAK DITEMUKAN UNTUK PESAN:", text);
+        return;
+      }
 
-console.log("TRIGGER KETEMU:", found);
+      console.log("TRIGGER KETEMU:", found);
 
       if (found.image && found.image.trim() !== "") {
-  const imagePath = path.join(__dirname, "images", "pb.png");
-  const imageBuffer = fs.readFileSync(imagePath);
+        await sock.sendMessage(msg.key.remoteJid, {
+          image: {
+            url: found.image.trim(),
+          },
+          caption: found.response || "",
+        });
 
-  await sock.sendMessage(msg.key.remoteJid, {
-    image: imageBuffer,
-    caption: found.response || "",
-  });
+        console.log("GAMBAR DARI DASHBOARD DIKIRIM:", found.image);
+      } else {
+        await sock.sendMessage(msg.key.remoteJid, {
+          text: found.response,
+        });
 
-  console.log("GAMBAR LOKAL DIKIRIM:", imagePath);
-} else {
-  await sock.sendMessage(msg.key.remoteJid, {
-    text: found.response,
-  });
-
-  console.log("BALASAN DIKIRIM:", found.response);
-}
+        console.log("BALASAN DIKIRIM:", found.response);
+      }
     } catch (err) {
-      console.log("ERROR:", err);
+      console.log("ERROR MESSAGE:", err?.message);
+      console.log("ERROR STACK:", err?.stack);
+      console.log("ERROR FULL:", err);
     }
   });
 }
