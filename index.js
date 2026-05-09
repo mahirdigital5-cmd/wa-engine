@@ -28,12 +28,11 @@ async function startBot() {
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
-    version,
-    auth: state,
-    printQRInTerminal: true,
-    logger: P({ level: "silent" }),
-    browser: ["ChatBotNexis", "Chrome", "1.0.0"],
-  });
+  version,
+  auth: state,
+  logger: P({ level: "silent" }),
+  browser: ["ChatBotNexis", "Chrome", "1.0.0"],
+});
 
   sock.ev.on("creds.update", saveCreds);
 
