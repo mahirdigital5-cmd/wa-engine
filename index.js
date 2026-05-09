@@ -77,12 +77,17 @@ async function startBot() {
       const triggers = await res.json();
 
       const found = triggers.find((t) => {
-        if (!t.is_active) return false;
+  if (!t.active) return false;
 
-        return text
-          .toLowerCase()
-          .includes(t.keyword.toLowerCase());
-      });
+  const incomingText = text.toLowerCase().trim();
+  const keyword = t.keyword.toLowerCase().trim();
+
+  if (t.type === "Sama Persis") {
+    return incomingText === keyword;
+  }
+
+  return incomingText.includes(keyword);
+});
 
       if (!found) {
         console.log("TRIGGER TIDAK DITEMUKAN");
