@@ -103,7 +103,7 @@ async function startBot() {
 console.log("TRIGGER KETEMU:", found);
 
       if (found.image && found.image.trim() !== "") {
-  const imagePath = path.join(__dirname, "images", "lampu.png");
+  const imagePath = path.join(__dirname, "images", "pb.png");
   const imageBuffer = fs.readFileSync(imagePath);
 
   await sock.sendMessage(msg.key.remoteJid, {
