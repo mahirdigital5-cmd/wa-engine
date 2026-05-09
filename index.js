@@ -12,6 +12,7 @@ import { Boom } from "@hapi/boom";
 const app = express();
 
 let latestQR = null;
+let isConnected = false;
 
 const TRIGGER_API = "https://chat-bot-nexis.vercel.app/api/triggers";
 
@@ -28,11 +29,11 @@ async function startBot() {
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
-  version,
-  auth: state,
-  logger: P({ level: "silent" }),
-  browser: ["ChatBotNexis", "Chrome", "1.0.0"],
-});
+    version,
+    auth: state,
+    logger: P({ level: "silent" }),
+    browser: ["ChatBotNexis", "Chrome", "1.0.0"],
+  });
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -43,15 +44,19 @@ async function startBot() {
 
     if (qr) {
       latestQR = await QRCode.toDataURL(qr);
+      isConnected = false;
       console.log("QR BERHASIL DIGENERATE");
     }
 
     if (connection === "open") {
       console.log("WHATSAPP TERHUBUNG");
       latestQR = null;
+      isConnected = true;
     }
 
     if (connection === "close") {
+      isConnected = false;
+
       const shouldReconnect =
         new Boom(lastDisconnect?.error)?.output?.statusCode !==
         DisconnectReason.loggedOut;
@@ -86,7 +91,6 @@ async function startBot() {
 
       const incomingText = normalizeText(text);
 
-      // 1. Cari trigger Sama Persis dulu
       let found = triggers.find((t) => {
         if (!t.active) return false;
         if (t.type !== "Sama Persis") return false;
@@ -94,7 +98,6 @@ async function startBot() {
         return incomingText === normalizeText(t.keyword);
       });
 
-      // 2. Kalau tidak ada, cari Mengandung pola/frasa lengkap
       if (!found) {
         found = triggers.find((t) => {
           if (!t.active) return false;
@@ -105,7 +108,6 @@ async function startBot() {
         });
       }
 
-      // 3. Kalau tidak ada juga, cari Mengandung salah satu kata
       if (!found) {
         found = triggers.find((t) => {
           if (!t.active) return false;
@@ -151,6 +153,20 @@ async function startBot() {
 
 app.get("/", (req, res) => {
   res.send("ChatBotNexis WA Engine Aktif");
+});
+
+app.get("/status", (req, res) => {
+  res.json({
+    connected: isConnected,
+    hasQR: !!latestQR,
+  });
+});
+
+app.get("/qr-json", (req, res) => {
+  res.json({
+    qr: latestQR,
+    connected: isConnected,
+  });
 });
 
 app.get("/qr", (req, res) => {
