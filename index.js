@@ -85,8 +85,17 @@ async function startBot() {
       const found = triggers.find((t) => {
   if (!t.active) return false;
 
-  const incomingText = text.toLowerCase().trim();
-  const keyword = t.keyword.toLowerCase().trim();
+  const incomingText = text
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\?/g, "")
+    .trim();
+
+  const keyword = t.keyword
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\?/g, "")
+    .trim();
 
   if (t.type === "Sama Persis") {
     return incomingText === keyword;
