@@ -100,15 +100,14 @@ console.log("TRIGGER KETEMU:", found);
       if (found.image) {
   const imageUrl = found.image.trim();
 
-  const imageRes = await fetch(imageUrl);
-  const imageBuffer = Buffer.from(await imageRes.arrayBuffer());
-
   await sock.sendMessage(msg.key.remoteJid, {
-    image: imageBuffer,
-    caption: found.response || "",
+    image: {
+      url: imageUrl,
+    },
+    caption: found.response || " ",
   });
 
-  console.log("GAMBAR DIKIRIM:", imageUrl);
+  console.log("GAMBAR URL DIKIRIM:", imageUrl);
 } else {
         await sock.sendMessage(msg.key.remoteJid, {
           text: found.response,
