@@ -80,7 +80,7 @@ async function startBot() {
 
       console.log("PESAN MASUK:", text);
 
-      const res = await fetch(TRIGGER_API);
+      const res = await fetch(`${TRIGGER_API}?t=${Date.now()}`);
       const triggers = await res.json();
 
       console.log("TRIGGERS DARI API:", triggers);
