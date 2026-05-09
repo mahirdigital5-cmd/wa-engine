@@ -97,43 +97,22 @@ async function startBot() {
 
 console.log("TRIGGER KETEMU:", found);
 
-      if (found.image) {
-  const imageUrl = found.image.trim();
-
-  console.log("MULAI AMBIL GAMBAR:", imageUrl);
-
-  const imageRes = await fetch(imageUrl, {
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-    },
-  });
-
-  console.log("STATUS GAMBAR:", imageRes.status);
-  console.log("TIPE GAMBAR:", imageRes.headers.get("content-type"));
-
-  if (!imageRes.ok) {
-    throw new Error("Gagal ambil gambar dari URL");
-  }
-
-  const imageBuffer = Buffer.from(await imageRes.arrayBuffer());
-
-  console.log("UKURAN GAMBAR:", imageBuffer.length);
-
+      if (found.image && found.image.trim() !== "") {
   await sock.sendMessage(msg.key.remoteJid, {
-    image: imageBuffer,
-    caption: found.response || " ",
-    mimetype: imageRes.headers.get("content-type") || "image/png",
-    fileName: "gambar.png",
+    image: {
+      url: found.image.trim(),
+    },
+    caption: found.response || "",
   });
 
-  console.log("GAMBAR BERHASIL DIKIRIM");
+  console.log("GAMBAR DIKIRIM:", found.image);
 } else {
-        await sock.sendMessage(msg.key.remoteJid, {
-          text: found.response,
-        });
+  await sock.sendMessage(msg.key.remoteJid, {
+    text: found.response,
+  });
 
-        console.log("BALASAN DIKIRIM:", found.response);
-      }
+  console.log("BALASAN DIKIRIM:", found.response);
+}
     } catch (err) {
       console.log("ERROR:", err);
     }
