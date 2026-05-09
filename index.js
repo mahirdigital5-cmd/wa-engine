@@ -75,6 +75,7 @@ async function startBot() {
 
       const res = await fetch(TRIGGER_API);
       const triggers = await res.json();
+      console.log("TRIGGERS DARI API:", triggers);
 
       const found = triggers.find((t) => {
   if (!t.active) return false;
@@ -90,9 +91,11 @@ async function startBot() {
 });
 
       if (!found) {
-        console.log("TRIGGER TIDAK DITEMUKAN");
-        return;
-      }
+  console.log("TRIGGER TIDAK DITEMUKAN UNTUK PESAN:", text);
+  return;
+}
+
+console.log("TRIGGER KETEMU:", found);
 
       if (found.image) {
   const imageUrl = found.image.trim();
