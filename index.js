@@ -95,13 +95,18 @@ async function startBot() {
       }
 
       if (found.image) {
-        await sock.sendMessage(msg.key.remoteJid, {
-          image: { url: found.image.trim() },
-          caption: found.response || "",
-        });
+  const imageUrl = found.image.trim();
 
-        console.log("GAMBAR DIKIRIM:", found.image);
-      } else {
+  const imageRes = await fetch(imageUrl);
+  const imageBuffer = Buffer.from(await imageRes.arrayBuffer());
+
+  await sock.sendMessage(msg.key.remoteJid, {
+    image: imageBuffer,
+    caption: found.response || "",
+  });
+
+  console.log("GAMBAR DIKIRIM:", imageUrl);
+} else {
         await sock.sendMessage(msg.key.remoteJid, {
           text: found.response,
         });
