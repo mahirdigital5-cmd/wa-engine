@@ -1,3 +1,6 @@
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import express from "express";
 import makeWASocket, {
   DisconnectReason,
@@ -10,6 +13,8 @@ import QRCode from "qrcode";
 import { Boom } from "@hapi/boom";
 
 const app = express();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let latestQR = null;
 
@@ -98,14 +103,15 @@ async function startBot() {
 console.log("TRIGGER KETEMU:", found);
 
       if (found.image && found.image.trim() !== "") {
+  const imagePath = path.join(__dirname, "images", "lampu.png");
+  const imageBuffer = fs.readFileSync(imagePath);
+
   await sock.sendMessage(msg.key.remoteJid, {
-    image: {
-      url: found.image.trim(),
-    },
+    image: imageBuffer,
     caption: found.response || "",
   });
 
-  console.log("GAMBAR DIKIRIM:", found.image);
+  console.log("GAMBAR LOKAL DIKIRIM:", imagePath);
 } else {
   await sock.sendMessage(msg.key.remoteJid, {
     text: found.response,
