@@ -86,16 +86,16 @@ async function startBot() {
   if (!t.active) return false;
 
   const incomingText = text
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/\?/g, "")
-    .trim();
+  .toLowerCase()
+  .replace(/\s+/g, " ")
+  .replace(/\?/g, "")
+  .trim();
 
-  const keyword = t.keyword
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/\?/g, "")
-    .trim();
+const keyword = t.keyword
+  .toLowerCase()
+  .replace(/\s+/g, " ")
+  .replace(/\?/g, "")
+  .trim();
 
   if (t.type === "Sama Persis") {
     return incomingText === keyword;
