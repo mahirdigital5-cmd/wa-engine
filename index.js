@@ -9,7 +9,16 @@ import P from "pino";
 import QRCode from "qrcode";
 import { Boom } from "@hapi/boom";
 
+let sockInstance = null;
+
 const app = express();
+
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  next();
+});
 
 let latestQR = null;
 let isConnected = false;
@@ -34,6 +43,8 @@ async function startBot() {
     logger: P({ level: "silent" }),
     browser: ["ChatBotNexis", "Chrome", "1.0.0"],
   });
+
+  sockInstance = sock;
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -77,8 +88,7 @@ async function startBot() {
       if (msg.key.fromMe) return;
 
       const text =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text;
+        msg.message.conversation || msg.message.extendedTextMessage?.text;
 
       if (!text) return;
 
@@ -182,6 +192,44 @@ app.get("/qr", (req, res) => {
       </body>
     </html>
   `);
+});
+
+app.get("/connect", async (req, res) => {
+  if (isConnected) {
+    return res.json({
+      success: true,
+      message: "WhatsApp sudah terhubung",
+    });
+  }
+
+  latestQR = null;
+  startBot();
+
+  res.json({
+    success: true,
+    message: "Membuat QR baru",
+  });
+});
+
+app.get("/logout", async (req, res) => {
+  try {
+    if (sockInstance) {
+      await sockInstance.logout();
+    }
+
+    latestQR = null;
+    isConnected = false;
+
+    res.json({
+      success: true,
+      message: "WhatsApp berhasil logout",
+    });
+  } catch (err) {
+    res.json({
+      success: false,
+      message: err?.message || "Gagal logout",
+    });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
