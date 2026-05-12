@@ -1,3 +1,4 @@
+import fs from "fs";
 import express from "express";
 import makeWASocket, {
   DisconnectReason,
@@ -195,20 +196,33 @@ app.get("/qr", (req, res) => {
 });
 
 app.get("/connect", async (req, res) => {
-  if (isConnected) {
-    return res.json({
+  try {
+    latestQR = null;
+    isConnected = false;
+
+    if (sockInstance) {
+      try {
+        sockInstance.end();
+      } catch (e) {}
+    }
+
+    await fs.promises.rm("session", {
+      recursive: true,
+      force: true,
+    });
+
+    startBot();
+
+    res.json({
       success: true,
-      message: "WhatsApp sudah terhubung",
+      message: "Session lama dihapus, membuat QR baru",
+    });
+  } catch (err) {
+    res.json({
+      success: false,
+      message: err?.message || "Gagal membuat QR",
     });
   }
-
-  latestQR = null;
-  startBot();
-
-  res.json({
-    success: true,
-    message: "Membuat QR baru",
-  });
 });
 
 app.get("/logout", async (req, res) => {
