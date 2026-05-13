@@ -29,9 +29,51 @@ const TRIGGER_API = "https://chat-bot-nexis.vercel.app/api/triggers";
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
-    .replace(/[?.,!]/g, "")
+    .replace(/[?.,!]/g, " ")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\bbrp\b/g, "berapa")
+    .replace(/\bbrpa\b/g, "berapa")
+    .replace(/\bbrapa\b/g, "berapa")
+    .replace(/\bbrpnya\b/g, "berapanya")
+    .replace(/\bharga nya\b/g, "harganya")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function isPriceQuestion(text = "") {
+  const normalized = normalizeText(text);
+
+  const priceWords = [
+    "berapa",
+    "harga",
+    "harganya",
+    "biaya",
+    "tarif",
+    "price",
+    "duit",
+    "bayar",
+    "ongkir",
+  ];
+
+  return priceWords.some((word) => normalized.includes(word));
+}
+
+function isPriceTrigger(keyword = "") {
+  const normalized = normalizeText(keyword);
+
+  const priceTriggerWords = [
+    "berapa harganya",
+    "harganya",
+    "harga",
+    "berapa harga",
+    "biaya",
+    "tarif",
+    "price",
+  ];
+
+  return priceTriggerWords.some((word) => normalized.includes(word));
 }
 
 async function updateSessionFlow(phone, flowId) {
@@ -133,41 +175,51 @@ async function startBot() {
       function matchTrigger(list) {
         let found = list.find((t) => {
           if (!t.active) return false;
+
+          const keyword = normalizeText(t.keyword);
+
+          if (isPriceTrigger(keyword) && isPriceQuestion(incomingText)) {
+            return true;
+          }
+
+          return false;
+        });
+
+        if (found) return found;
+
+        found = list.find((t) => {
+          if (!t.active) return false;
           if (t.type !== "Sama Persis") return false;
 
           return incomingText === normalizeText(t.keyword);
         });
 
-        if (!found) {
-          found = list.find((t) => {
-            if (!t.active) return false;
-            if (t.type === "Sama Persis") return false;
+        if (found) return found;
 
-            const keyword = normalizeText(t.keyword);
-            return incomingText.includes(keyword);
-          });
-        }
+        found = list.find((t) => {
+          if (!t.active) return false;
+          if (t.type === "Sama Persis") return false;
 
-        if (!found) {
-          found = list.find((t) => {
-            if (!t.active) return false;
-            if (t.type === "Sama Persis") return false;
+          const keyword = normalizeText(t.keyword);
+          return incomingText.includes(keyword);
+        });
 
-            const keyword = normalizeText(t.keyword);
-            const words = keyword.split(" ").filter(Boolean);
+        if (found) return found;
 
-            return words.some((word) => incomingText.includes(word));
-          });
-        }
+        found = list.find((t) => {
+          if (!t.active) return false;
+          if (t.type === "Sama Persis") return false;
+
+          const keyword = normalizeText(t.keyword);
+          const words = keyword.split(" ").filter(Boolean);
+
+          return words.some((word) => incomingText.includes(word));
+        });
 
         return found;
       }
 
       let found = null;
-
-      // ==========================
-      // 1. CEK FLOW ENTRY DULU
-      // ==========================
 
       const flowEntryTriggers = triggers.filter(
         (t) => t.is_flow_entry === true
@@ -185,15 +237,9 @@ async function startBot() {
         }
       }
 
-      // ==========================
-      // 2. CEK FLOW AKTIF
-      // ==========================
-
       if (!found && session?.flow_id) {
         const triggersInActiveFlow = triggers.filter(
-          (t) =>
-            t.flow_id === session.flow_id &&
-            t.is_flow_entry !== true
+          (t) => t.flow_id === session.flow_id && t.is_flow_entry !== true
         );
 
         found = matchTrigger(triggersInActiveFlow);
@@ -202,10 +248,6 @@ async function startBot() {
           console.log("TRIGGER DI FLOW AKTIF:", found);
         }
       }
-
-      // ==========================
-      // 3. FALLBACK GLOBAL
-      // ==========================
 
       if (!found) {
         const globalTriggers = triggers.filter(
