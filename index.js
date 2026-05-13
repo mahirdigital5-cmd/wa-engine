@@ -76,6 +76,25 @@ function isPriceTrigger(keyword = "") {
   return priceTriggerWords.some((word) => normalized.includes(word));
 }
 
+function getMediaList(found) {
+  if (Array.isArray(found.media)) {
+    return found.media.filter((item) => item?.url);
+  }
+
+  if (typeof found.media === "string") {
+    try {
+      const parsed = JSON.parse(found.media);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item) => item?.url);
+      }
+    } catch (err) {
+      return [];
+    }
+  }
+
+  return [];
+}
+
 async function updateSessionFlow(phone, flowId) {
   try {
     await fetch(`${TRIGGER_API}?t=${Date.now()}`, {
@@ -268,7 +287,39 @@ async function startBot() {
 
       console.log("TRIGGER FINAL:", found);
 
-      if (found.image && found.image.trim() !== "") {
+      const mediaList = getMediaList(found);
+
+      if (mediaList.length > 0) {
+        for (let i = 0; i < mediaList.length; i++) {
+          const media = mediaList[i];
+          const mediaUrl = String(media.url || "").trim();
+          const mediaType = String(media.type || "image").toLowerCase();
+
+          if (!mediaUrl) continue;
+
+          const caption = i === 0 ? found.response || "" : "";
+
+          if (mediaType === "video") {
+            await sock.sendMessage(msg.key.remoteJid, {
+              video: {
+                url: mediaUrl,
+              },
+              caption,
+            });
+
+            console.log("VIDEO DIKIRIM:", mediaUrl);
+          } else {
+            await sock.sendMessage(msg.key.remoteJid, {
+              image: {
+                url: mediaUrl,
+              },
+              caption,
+            });
+
+            console.log("GAMBAR DIKIRIM:", mediaUrl);
+          }
+        }
+      } else if (found.image && found.image.trim() !== "") {
         await sock.sendMessage(msg.key.remoteJid, {
           image: {
             url: found.image.trim(),
@@ -276,10 +327,10 @@ async function startBot() {
           caption: found.response || "",
         });
 
-        console.log("GAMBAR DIKIRIM");
+        console.log("GAMBAR LAMA DIKIRIM");
       } else {
         await sock.sendMessage(msg.key.remoteJid, {
-          text: found.response,
+          text: found.response || "",
         });
 
         console.log("BALASAN DIKIRIM");
