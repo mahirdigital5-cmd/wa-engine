@@ -127,7 +127,6 @@ async function startBot() {
       const session = data.session || null;
 
       console.log("SESSION AKTIF:", session);
-      console.log("TRIGGERS DARI API:", triggers);
 
       const incomingText = normalizeText(text);
 
@@ -166,46 +165,66 @@ async function startBot() {
 
       let found = null;
 
-      const globalTrigger = matchTrigger(triggers);
+      // ==========================
+      // 1. CEK FLOW ENTRY DULU
+      // ==========================
 
-      if (globalTrigger && globalTrigger.flow_id) {
-        found = globalTrigger;
+      const flowEntryTriggers = triggers.filter(
+        (t) => t.is_flow_entry === true
+      );
 
-        console.log("TRIGGER PEMBUKA FLOW / PINDAH FLOW:", found);
+      const flowEntryFound = matchTrigger(flowEntryTriggers);
 
-        await updateSessionFlow(phone, found.flow_id);
+      if (flowEntryFound) {
+        found = flowEntryFound;
+
+        console.log("FLOW ENTRY DITEMUKAN:", found);
+
+        if (found.flow_id) {
+          await updateSessionFlow(phone, found.flow_id);
+        }
       }
+
+      // ==========================
+      // 2. CEK FLOW AKTIF
+      // ==========================
 
       if (!found && session?.flow_id) {
         const triggersInActiveFlow = triggers.filter(
-          (t) => t.flow_id === session.flow_id
+          (t) =>
+            t.flow_id === session.flow_id &&
+            t.is_flow_entry !== true
         );
 
         found = matchTrigger(triggersInActiveFlow);
 
         if (found) {
-          console.log("TRIGGER KETEMU DI FLOW AKTIF:", found);
+          console.log("TRIGGER DI FLOW AKTIF:", found);
         }
       }
 
+      // ==========================
+      // 3. FALLBACK GLOBAL
+      // ==========================
+
       if (!found) {
-        found = globalTrigger;
+        const globalTriggers = triggers.filter(
+          (t) => t.is_flow_entry !== true
+        );
+
+        found = matchTrigger(globalTriggers);
 
         if (found) {
-          console.log("TRIGGER GLOBAL KETEMU:", found);
-
-          if (found.flow_id) {
-            await updateSessionFlow(phone, found.flow_id);
-          }
+          console.log("TRIGGER GLOBAL:", found);
         }
       }
 
       if (!found) {
-        console.log("TRIGGER TIDAK DITEMUKAN UNTUK PESAN:", text);
+        console.log("TRIGGER TIDAK DITEMUKAN:", text);
         return;
       }
 
-      console.log("TRIGGER KETEMU:", found);
+      console.log("TRIGGER FINAL:", found);
 
       if (found.image && found.image.trim() !== "") {
         await sock.sendMessage(msg.key.remoteJid, {
@@ -215,13 +234,13 @@ async function startBot() {
           caption: found.response || "",
         });
 
-        console.log("GAMBAR DARI DASHBOARD DIKIRIM:", found.image);
+        console.log("GAMBAR DIKIRIM");
       } else {
         await sock.sendMessage(msg.key.remoteJid, {
           text: found.response,
         });
 
-        console.log("BALASAN DIKIRIM:", found.response);
+        console.log("BALASAN DIKIRIM");
       }
     } catch (err) {
       console.log("ERROR MESSAGE:", err?.message);
