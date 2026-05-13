@@ -93,42 +93,93 @@ async function startBot() {
 
       if (!text) return;
 
+      const phone = msg.key.remoteJid;
+
       console.log("PESAN MASUK:", text);
+      console.log("DARI NOMOR:", phone);
 
-      const res = await fetch(`${TRIGGER_API}?t=${Date.now()}`);
-      const triggers = await res.json();
+      const res = await fetch(
+        `${TRIGGER_API}?phone=${encodeURIComponent(phone)}&t=${Date.now()}`
+      );
 
+      const data = await res.json();
+
+      const triggers = data.triggers || [];
+      const session = data.session || null;
+
+      console.log("SESSION AKTIF:", session);
       console.log("TRIGGERS DARI API:", triggers);
 
       const incomingText = normalizeText(text);
 
-      let found = triggers.find((t) => {
-        if (!t.active) return false;
-        if (t.type !== "Sama Persis") return false;
-
-        return incomingText === normalizeText(t.keyword);
-      });
-
-      if (!found) {
-        found = triggers.find((t) => {
+      function matchTrigger(list) {
+        let found = list.find((t) => {
           if (!t.active) return false;
-          if (t.type === "Sama Persis") return false;
+          if (t.type !== "Sama Persis") return false;
 
-          const keyword = normalizeText(t.keyword);
-          return incomingText.includes(keyword);
+          return incomingText === normalizeText(t.keyword);
         });
+
+        if (!found) {
+          found = list.find((t) => {
+            if (!t.active) return false;
+            if (t.type === "Sama Persis") return false;
+
+            const keyword = normalizeText(t.keyword);
+            return incomingText.includes(keyword);
+          });
+        }
+
+        if (!found) {
+          found = list.find((t) => {
+            if (!t.active) return false;
+            if (t.type === "Sama Persis") return false;
+
+            const keyword = normalizeText(t.keyword);
+            const words = keyword.split(" ").filter(Boolean);
+
+            return words.some((word) => incomingText.includes(word));
+          });
+        }
+
+        return found;
+      }
+
+      let found = null;
+
+      if (session?.flow_id) {
+        const triggersInActiveFlow = triggers.filter(
+          (t) => t.flow_id === session.flow_id
+        );
+
+        found = matchTrigger(triggersInActiveFlow);
+
+        if (found) {
+          console.log("TRIGGER KETEMU DI FLOW AKTIF:", found);
+        }
       }
 
       if (!found) {
-        found = triggers.find((t) => {
-          if (!t.active) return false;
-          if (t.type === "Sama Persis") return false;
+        found = matchTrigger(triggers);
 
-          const keyword = normalizeText(t.keyword);
-          const words = keyword.split(" ").filter(Boolean);
+        if (found) {
+          console.log("TRIGGER GLOBAL / PEMBUKA FLOW KETEMU:", found);
 
-          return words.some((word) => incomingText.includes(word));
-        });
+          if (found.flow_id) {
+            await fetch(`${TRIGGER_API}?t=${Date.now()}`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                phone,
+                flow_id: found.flow_id,
+              }),
+            });
+
+            console.log("SESSION FLOW DIUPDATE:", found.flow_id);
+          }
+        }
       }
 
       if (!found) {
