@@ -34,6 +34,25 @@ function normalizeText(value) {
     .trim();
 }
 
+async function updateSessionFlow(phone, flowId) {
+  try {
+    await fetch(`${TRIGGER_API}?t=${Date.now()}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        phone,
+        flow_id: flowId,
+      }),
+    });
+
+    console.log("SESSION FLOW DIUPDATE:", flowId);
+  } catch (err) {
+    console.log("GAGAL UPDATE SESSION:", err?.message);
+  }
+}
+
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState("session");
   const { version } = await fetchLatestBaileysVersion();
@@ -147,7 +166,17 @@ async function startBot() {
 
       let found = null;
 
-      if (session?.flow_id) {
+      const globalTrigger = matchTrigger(triggers);
+
+      if (globalTrigger && globalTrigger.flow_id) {
+        found = globalTrigger;
+
+        console.log("TRIGGER PEMBUKA FLOW / PINDAH FLOW:", found);
+
+        await updateSessionFlow(phone, found.flow_id);
+      }
+
+      if (!found && session?.flow_id) {
         const triggersInActiveFlow = triggers.filter(
           (t) => t.flow_id === session.flow_id
         );
@@ -160,24 +189,13 @@ async function startBot() {
       }
 
       if (!found) {
-        found = matchTrigger(triggers);
+        found = globalTrigger;
 
         if (found) {
-          console.log("TRIGGER GLOBAL / PEMBUKA FLOW KETEMU:", found);
+          console.log("TRIGGER GLOBAL KETEMU:", found);
 
           if (found.flow_id) {
-            await fetch(`${TRIGGER_API}?t=${Date.now()}`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                phone,
-                flow_id: found.flow_id,
-              }),
-            });
-
-            console.log("SESSION FLOW DIUPDATE:", found.flow_id);
+            await updateSessionFlow(phone, found.flow_id);
           }
         }
       }
