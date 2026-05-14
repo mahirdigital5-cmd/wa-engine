@@ -84,7 +84,24 @@ function isPriceTrigger(keyword = "") {
 
   return priceTriggerWords.some((word) => normalized.includes(word));
 }
+function getResponseParts(response = "") {
+  return String(response || "")
+    .split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
 
+function uniqueTriggers(list) {
+  const seen = new Set();
+
+  return list.filter((item) => {
+    if (!item?.id) return false;
+    if (seen.has(item.id)) return false;
+
+    seen.add(item.id);
+    return true;
+  });
+}
 function getMediaList(found) {
   if (Array.isArray(found.media)) {
     return found.media.filter((item) => item?.url);
@@ -243,156 +260,158 @@ async function startBot() {
 
         const incomingText = normalizeText(text);
 
-        function matchTrigger(list) {
-          let found = list.find((t) => {
-            if (!t.active) return false;
+        function matchTriggers(list) {
+  const activeList = list.filter((t) => t.active);
 
-            const keyword = normalizeText(t.keyword);
+  const priceMatches = activeList.filter((t) => {
+    const keyword = normalizeText(t.keyword);
 
-            if (isPriceTrigger(keyword) && isPriceQuestion(incomingText)) {
-              return true;
-            }
+    return isPriceTrigger(keyword) && isPriceQuestion(incomingText);
+  });
 
-            return false;
-          });
+  const exactMatches = activeList.filter((t) => {
+    if (t.type !== "Sama Persis") return false;
 
-          if (found) return found;
+    return incomingText === normalizeText(t.keyword);
+  });
 
-          found = list.find((t) => {
-            if (!t.active) return false;
-            if (t.type !== "Sama Persis") return false;
+  const containsMatches = activeList.filter((t) => {
+    if (t.type === "Sama Persis") return false;
 
-            return incomingText === normalizeText(t.keyword);
-          });
+    const keyword = normalizeText(t.keyword);
+    return keyword && incomingText.includes(keyword);
+  });
 
-          if (found) return found;
+  const wordMatches = activeList.filter((t) => {
+    if (t.type === "Sama Persis") return false;
 
-          found = list.find((t) => {
-            if (!t.active) return false;
-            if (t.type === "Sama Persis") return false;
+    const keyword = normalizeText(t.keyword);
+    const words = keyword.split(" ").filter(Boolean);
 
-            const keyword = normalizeText(t.keyword);
-            return keyword && incomingText.includes(keyword);
-          });
+    return words.some((word) => incomingText.includes(word));
+  });
 
-          if (found) return found;
+  return uniqueTriggers([
+    ...priceMatches,
+    ...exactMatches,
+    ...containsMatches,
+    ...wordMatches,
+  ]);
+}
 
-          found = list.find((t) => {
-            if (!t.active) return false;
-            if (t.type === "Sama Persis") return false;
+        let foundList = [];
 
-            const keyword = normalizeText(t.keyword);
-            const words = keyword.split(" ").filter(Boolean);
+const flowEntryTriggers = triggers.filter((t) => t.is_flow_entry === true);
 
-            return words.some((word) => incomingText.includes(word));
-          });
+const flowEntryFoundList = matchTriggers(flowEntryTriggers);
 
-          return found;
-        }
+if (flowEntryFoundList.length > 0) {
+  foundList = flowEntryFoundList;
 
-        let found = null;
+  console.log("FLOW ENTRY DITEMUKAN:", foundList);
 
-        const flowEntryTriggers = triggers.filter(
-          (t) => t.is_flow_entry === true
-        );
+  const firstFlowEntry = flowEntryFoundList[0];
 
-        const flowEntryFound = matchTrigger(flowEntryTriggers);
+  if (firstFlowEntry?.flow_id) {
+    await updateSessionFlow(phone, firstFlowEntry.flow_id);
+  }
+}
 
-        if (flowEntryFound) {
-          found = flowEntryFound;
+if (foundList.length === 0 && session?.flow_id) {
+  const triggersInActiveFlow = triggers.filter(
+    (t) => t.flow_id === session.flow_id && t.is_flow_entry !== true
+  );
 
-          console.log("FLOW ENTRY DITEMUKAN:", found);
+  foundList = matchTriggers(triggersInActiveFlow);
 
-          if (found.flow_id) {
-            await updateSessionFlow(phone, found.flow_id);
-          }
-        }
+  if (foundList.length > 0) {
+    console.log("TRIGGER DI FLOW AKTIF:", foundList);
+  }
+}
 
-        if (!found && session?.flow_id) {
-          const triggersInActiveFlow = triggers.filter(
-            (t) => t.flow_id === session.flow_id && t.is_flow_entry !== true
-          );
+if (foundList.length === 0) {
+  const globalTriggers = triggers.filter((t) => t.is_flow_entry !== true);
 
-          found = matchTrigger(triggersInActiveFlow);
+  foundList = matchTriggers(globalTriggers);
 
-          if (found) {
-            console.log("TRIGGER DI FLOW AKTIF:", found);
-          }
-        }
+  if (foundList.length > 0) {
+    console.log("TRIGGER GLOBAL:", foundList);
+  }
+}
 
-        if (!found) {
-          const globalTriggers = triggers.filter(
-            (t) => t.is_flow_entry !== true
-          );
+if (foundList.length === 0) {
+  console.log("TRIGGER TIDAK DITEMUKAN:", text);
+  return;
+}
 
-          found = matchTrigger(globalTriggers);
+        console.log("TRIGGER FINAL:", foundList);
 
-          if (found) {
-            console.log("TRIGGER GLOBAL:", found);
-          }
-        }
+for (const found of foundList) {
+  const mediaList = getMediaList(found);
+  const responseParts = getResponseParts(found.response);
 
-        if (!found) {
-          console.log("TRIGGER TIDAK DITEMUKAN:", text);
-          return;
-        }
+  if (mediaList.length > 0) {
+    for (let i = 0; i < mediaList.length; i++) {
+      const media = mediaList[i];
+      const mediaUrl = String(media.url || "").trim();
+      const mediaType = String(media.type || "image").toLowerCase();
 
-        console.log("TRIGGER FINAL:", found);
+      if (!mediaUrl) continue;
 
-        const mediaList = getMediaList(found);
+      if (mediaType === "video") {
+        await sock.sendMessage(msg.key.remoteJid, {
+          video: {
+            url: mediaUrl,
+          },
+        });
 
-        if (mediaList.length > 0) {
-          for (let i = 0; i < mediaList.length; i++) {
-            const media = mediaList[i];
-            const mediaUrl = String(media.url || "").trim();
-            const mediaType = String(media.type || "image").toLowerCase();
+        console.log("VIDEO DIKIRIM:", mediaUrl);
+      } else {
+        await sock.sendMessage(msg.key.remoteJid, {
+          image: {
+            url: mediaUrl,
+          },
+        });
 
-            if (!mediaUrl) continue;
-
-            const caption = i === 0 ? found.response || "" : "";
-
-            if (mediaType === "video") {
-              await sock.sendMessage(msg.key.remoteJid, {
-                video: {
-                  url: mediaUrl,
-                },
-                caption,
-              });
-
-              console.log("VIDEO DIKIRIM:", mediaUrl);
-            } else {
-              await sock.sendMessage(msg.key.remoteJid, {
-                image: {
-                  url: mediaUrl,
-                },
-                caption,
-              });
-
-              console.log("GAMBAR DIKIRIM:", mediaUrl);
-            }
-          }
-        } else if (found.image && String(found.image).trim() !== "") {
-          await sock.sendMessage(msg.key.remoteJid, {
-            image: {
-              url: String(found.image).trim(),
-            },
-            caption: found.response || "",
-          });
-
-          console.log("GAMBAR LAMA DIKIRIM");
-        } else {
-          await sock.sendMessage(msg.key.remoteJid, {
-            text: found.response || "",
-          });
-
-          console.log("BALASAN DIKIRIM");
-        }
-      } catch (err) {
-        console.log("ERROR MESSAGE:", err?.message);
-        console.log("ERROR STACK:", err?.stack);
-        console.log("ERROR FULL:", err);
+        console.log("GAMBAR DIKIRIM:", mediaUrl);
       }
+    }
+
+    for (const part of responseParts) {
+      await sock.sendMessage(msg.key.remoteJid, {
+        text: part,
+      });
+
+      console.log("BALASAN TEXT DIKIRIM:", part);
+    }
+  } else if (found.image && String(found.image).trim() !== "") {
+    await sock.sendMessage(msg.key.remoteJid, {
+      image: {
+        url: String(found.image).trim(),
+      },
     });
+
+    console.log("GAMBAR LAMA DIKIRIM");
+
+    for (const part of responseParts) {
+      await sock.sendMessage(msg.key.remoteJid, {
+        text: part,
+      });
+
+      console.log("BALASAN TEXT DIKIRIM:", part);
+    }
+  } else {
+    for (const part of responseParts) {
+      await sock.sendMessage(msg.key.remoteJid, {
+        text: part,
+      });
+
+      console.log("BALASAN TEXT DIKIRIM:", part);
+    }
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 700));
+}
   } catch (err) {
     isStarting = false;
     console.log("GAGAL START BOT:", err?.message);
