@@ -10,8 +10,6 @@ import P from "pino";
 import QRCode from "qrcode";
 import { Boom } from "@hapi/boom";
 
-let sockInstance = null;
-
 const app = express();
 
 app.use(express.json({ limit: "50mb" }));
@@ -20,7 +18,7 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
   if (req.method === "OPTIONS") {
     return res.sendStatus(200);
@@ -29,9 +27,11 @@ app.use((req, res, next) => {
   next();
 });
 
+let sockInstance = null;
 let latestQR = null;
 let isConnected = false;
 let isStarting = false;
+let reconnectTimer = null;
 
 const TRIGGER_API = "https://chat-bot-nexis.vercel.app/api/triggers";
 
@@ -84,6 +84,7 @@ function isPriceTrigger(keyword = "") {
 
   return priceTriggerWords.some((word) => normalized.includes(word));
 }
+
 function getResponseParts(response = "") {
   return String(response || "")
     .split(/\n+/)
@@ -102,6 +103,7 @@ function uniqueTriggers(list) {
     return true;
   });
 }
+
 function getMediaList(found) {
   if (Array.isArray(found.media)) {
     return found.media.filter((item) => item?.url);
@@ -172,12 +174,38 @@ async function updateSessionFlow(phone, flowId) {
   }
 }
 
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+async function stopSocket() {
+  try {
+    if (sockInstance) {
+      try {
+        sockInstance.ev.removeAllListeners();
+      } catch {}
+
+      try {
+        sockInstance.end();
+      } catch {}
+    }
+  } catch {}
+
+  sockInstance = null;
+  isConnected = false;
+}
+
 async function startBot() {
   if (isStarting) return;
 
   isStarting = true;
 
   try {
+    clearReconnectTimer();
+
     const { state, saveCreds } = await useMultiFileAuthState("session");
     const { version } = await fetchLatestBaileysVersion();
 
@@ -186,6 +214,7 @@ async function startBot() {
       auth: state,
       logger: P({ level: "silent" }),
       browser: ["ChatBotNexis", "Chrome", "1.0.0"],
+      printQRInTerminal: false,
     });
 
     sockInstance = sock;
@@ -196,7 +225,10 @@ async function startBot() {
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-      console.log("UPDATE:", update);
+      console.log("CONNECTION UPDATE:", {
+        connection,
+        hasQR: !!qr,
+      });
 
       if (qr) {
         latestQR = await QRCode.toDataURL(qr);
@@ -214,16 +246,19 @@ async function startBot() {
         isConnected = false;
 
         const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
         console.log("KONEKSI PUTUS");
         console.log("STATUS CODE:", statusCode);
 
         if (shouldReconnect) {
-          setTimeout(() => {
+          clearReconnectTimer();
+
+          reconnectTimer = setTimeout(() => {
             startBot();
           }, 3000);
+        } else {
+          latestQR = null;
         }
       }
     });
@@ -261,160 +296,167 @@ async function startBot() {
         const incomingText = normalizeText(text);
 
         function matchTriggers(list) {
-  const activeList = list.filter((t) => t.active);
+          const activeList = list.filter((t) => t.active);
 
-  const priceMatches = activeList.filter((t) => {
-    const keyword = normalizeText(t.keyword);
+          const priceMatches = activeList.filter((t) => {
+            const keyword = normalizeText(t.keyword);
+            return isPriceTrigger(keyword) && isPriceQuestion(incomingText);
+          });
 
-    return isPriceTrigger(keyword) && isPriceQuestion(incomingText);
-  });
+          const exactMatches = activeList.filter((t) => {
+            if (t.type !== "Sama Persis") return false;
+            return incomingText === normalizeText(t.keyword);
+          });
 
-  const exactMatches = activeList.filter((t) => {
-    if (t.type !== "Sama Persis") return false;
+          const containsMatches = activeList.filter((t) => {
+            if (t.type === "Sama Persis") return false;
 
-    return incomingText === normalizeText(t.keyword);
-  });
+            const keyword = normalizeText(t.keyword);
+            return keyword && incomingText.includes(keyword);
+          });
 
-  const containsMatches = activeList.filter((t) => {
-    if (t.type === "Sama Persis") return false;
+          const wordMatches = activeList.filter((t) => {
+            if (t.type === "Sama Persis") return false;
 
-    const keyword = normalizeText(t.keyword);
-    return keyword && incomingText.includes(keyword);
-  });
+            const keyword = normalizeText(t.keyword);
+            const words = keyword.split(" ").filter(Boolean);
 
-  const wordMatches = activeList.filter((t) => {
-    if (t.type === "Sama Persis") return false;
+            return words.some((word) => incomingText.includes(word));
+          });
 
-    const keyword = normalizeText(t.keyword);
-    const words = keyword.split(" ").filter(Boolean);
-
-    return words.some((word) => incomingText.includes(word));
-  });
-
-  return uniqueTriggers([
-    ...priceMatches,
-    ...exactMatches,
-    ...containsMatches,
-    ...wordMatches,
-  ]);
-}
+          return uniqueTriggers([
+            ...priceMatches,
+            ...exactMatches,
+            ...containsMatches,
+            ...wordMatches,
+          ]);
+        }
 
         let foundList = [];
 
-const flowEntryTriggers = triggers.filter((t) => t.is_flow_entry === true);
+        const flowEntryTriggers = triggers.filter(
+          (t) => t.is_flow_entry === true
+        );
 
-const flowEntryFoundList = matchTriggers(flowEntryTriggers);
+        const flowEntryFoundList = matchTriggers(flowEntryTriggers);
 
-if (flowEntryFoundList.length > 0) {
-  foundList = flowEntryFoundList;
+        if (flowEntryFoundList.length > 0) {
+          foundList = flowEntryFoundList;
 
-  console.log("FLOW ENTRY DITEMUKAN:", foundList);
+          console.log("FLOW ENTRY DITEMUKAN:", foundList);
 
-  const firstFlowEntry = flowEntryFoundList[0];
+          const firstFlowEntry = flowEntryFoundList[0];
 
-  if (firstFlowEntry?.flow_id) {
-    await updateSessionFlow(phone, firstFlowEntry.flow_id);
-  }
-}
+          if (firstFlowEntry?.flow_id) {
+            await updateSessionFlow(phone, firstFlowEntry.flow_id);
+          }
+        }
 
-if (foundList.length === 0 && session?.flow_id) {
-  const triggersInActiveFlow = triggers.filter(
-    (t) => t.flow_id === session.flow_id && t.is_flow_entry !== true
-  );
+        if (foundList.length === 0 && session?.flow_id) {
+          const triggersInActiveFlow = triggers.filter(
+            (t) => t.flow_id === session.flow_id && t.is_flow_entry !== true
+          );
 
-  foundList = matchTriggers(triggersInActiveFlow);
+          foundList = matchTriggers(triggersInActiveFlow);
 
-  if (foundList.length > 0) {
-    console.log("TRIGGER DI FLOW AKTIF:", foundList);
-  }
-}
+          if (foundList.length > 0) {
+            console.log("TRIGGER DI FLOW AKTIF:", foundList);
+          }
+        }
 
-if (foundList.length === 0) {
-  const globalTriggers = triggers.filter((t) => t.is_flow_entry !== true);
+        if (foundList.length === 0) {
+          const globalTriggers = triggers.filter((t) => t.is_flow_entry !== true);
 
-  foundList = matchTriggers(globalTriggers);
+          foundList = matchTriggers(globalTriggers);
 
-  if (foundList.length > 0) {
-    console.log("TRIGGER GLOBAL:", foundList);
-  }
-}
+          if (foundList.length > 0) {
+            console.log("TRIGGER GLOBAL:", foundList);
+          }
+        }
 
-if (foundList.length === 0) {
-  console.log("TRIGGER TIDAK DITEMUKAN:", text);
-  return;
-}
+        if (foundList.length === 0) {
+          console.log("TRIGGER TIDAK DITEMUKAN:", text);
+          return;
+        }
 
         console.log("TRIGGER FINAL:", foundList);
 
-for (const found of foundList) {
-  const mediaList = getMediaList(found);
-  const responseParts = getResponseParts(found.response);
+        for (const found of foundList) {
+          const mediaList = getMediaList(found);
+          const responseParts = getResponseParts(found.response);
 
-  if (mediaList.length > 0) {
-    for (let i = 0; i < mediaList.length; i++) {
-      const media = mediaList[i];
-      const mediaUrl = String(media.url || "").trim();
-      const mediaType = String(media.type || "image").toLowerCase();
+          if (mediaList.length > 0) {
+            for (let i = 0; i < mediaList.length; i++) {
+              const media = mediaList[i];
+              const mediaUrl = String(media.url || "").trim();
+              const mediaType = String(media.type || "image").toLowerCase();
 
-      if (!mediaUrl) continue;
+              if (!mediaUrl) continue;
 
-      if (mediaType === "video") {
-        await sock.sendMessage(msg.key.remoteJid, {
-          video: {
-            url: mediaUrl,
-          },
-        });
+              if (mediaType === "video") {
+                await sock.sendMessage(msg.key.remoteJid, {
+                  video: {
+                    url: mediaUrl,
+                  },
+                });
 
-        console.log("VIDEO DIKIRIM:", mediaUrl);
-      } else {
-        await sock.sendMessage(msg.key.remoteJid, {
-          image: {
-            url: mediaUrl,
-          },
-        });
+                console.log("VIDEO DIKIRIM:", mediaUrl);
+              } else {
+                await sock.sendMessage(msg.key.remoteJid, {
+                  image: {
+                    url: mediaUrl,
+                  },
+                });
 
-        console.log("GAMBAR DIKIRIM:", mediaUrl);
+                console.log("GAMBAR DIKIRIM:", mediaUrl);
+              }
+            }
+
+            for (const part of responseParts) {
+              await sock.sendMessage(msg.key.remoteJid, {
+                text: part,
+              });
+
+              console.log("BALASAN TEXT DIKIRIM:", part);
+            }
+          } else if (found.image && String(found.image).trim() !== "") {
+            await sock.sendMessage(msg.key.remoteJid, {
+              image: {
+                url: String(found.image).trim(),
+              },
+            });
+
+            console.log("GAMBAR LAMA DIKIRIM");
+
+            for (const part of responseParts) {
+              await sock.sendMessage(msg.key.remoteJid, {
+                text: part,
+              });
+
+              console.log("BALASAN TEXT DIKIRIM:", part);
+            }
+          } else {
+            for (const part of responseParts) {
+              await sock.sendMessage(msg.key.remoteJid, {
+                text: part,
+              });
+
+              console.log("BALASAN TEXT DIKIRIM:", part);
+            }
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 700));
+        }
+      } catch (err) {
+        console.log("ERROR MESSAGE:", err?.message);
+        console.log("ERROR STACK:", err?.stack);
+        console.log("ERROR FULL:", err);
       }
-    }
-
-    for (const part of responseParts) {
-      await sock.sendMessage(msg.key.remoteJid, {
-        text: part,
-      });
-
-      console.log("BALASAN TEXT DIKIRIM:", part);
-    }
-  } else if (found.image && String(found.image).trim() !== "") {
-    await sock.sendMessage(msg.key.remoteJid, {
-      image: {
-        url: String(found.image).trim(),
-      },
     });
-
-    console.log("GAMBAR LAMA DIKIRIM");
-
-    for (const part of responseParts) {
-      await sock.sendMessage(msg.key.remoteJid, {
-        text: part,
-      });
-
-      console.log("BALASAN TEXT DIKIRIM:", part);
-    }
-  } else {
-    for (const part of responseParts) {
-      await sock.sendMessage(msg.key.remoteJid, {
-        text: part,
-      });
-
-      console.log("BALASAN TEXT DIKIRIM:", part);
-    }
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, 700));
-}
   } catch (err) {
     isStarting = false;
     console.log("GAGAL START BOT:", err?.message);
+    console.log("GAGAL START BOT STACK:", err?.stack);
   }
 }
 
@@ -424,28 +466,63 @@ app.get("/", (req, res) => {
 
 app.get("/status", (req, res) => {
   res.json({
+    success: true,
     connected: isConnected,
     hasQR: !!latestQR,
+    starting: isStarting,
   });
 });
 
 app.get("/qr-json", (req, res) => {
   res.json({
+    success: true,
     qr: latestQR,
     connected: isConnected,
+    hasQR: !!latestQR,
+    starting: isStarting,
   });
 });
 
 app.get("/qr", (req, res) => {
+  res.setHeader("Content-Type", "text/html");
+
+  if (isConnected) {
+    return res.send(`
+      <html>
+        <body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#07140f;color:white;font-family:sans-serif;text-align:center">
+          <div>
+            <h2>WhatsApp sudah terhubung</h2>
+            <p>Tidak perlu scan QR lagi.</p>
+          </div>
+        </body>
+      </html>
+    `);
+  }
+
   if (!latestQR) {
-    return res.send("QR belum siap atau WhatsApp sudah terhubung.");
+    return res.send(`
+      <html>
+        <head>
+          <meta http-equiv="refresh" content="3">
+        </head>
+        <body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#07140f;color:white;font-family:sans-serif;text-align:center">
+          <div>
+            <h2>QR sedang dibuat...</h2>
+            <p>Tunggu beberapa detik. Halaman ini refresh otomatis.</p>
+          </div>
+        </body>
+      </html>
+    `);
   }
 
   res.send(`
     <html>
-      <body style="text-align:center;font-family:sans-serif">
-        <h1>SCAN QR WHATSAPP</h1>
-        <img src="${latestQR}" />
+      <body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#07140f;color:white;font-family:sans-serif;text-align:center">
+        <div>
+          <h2>Scan QR WhatsApp</h2>
+          <img src="${latestQR}" style="width:280px;max-width:90%;border-radius:16px;background:white;padding:12px" />
+          <p>Scan dari aplikasi WhatsApp.</p>
+        </div>
       </body>
     </html>
   `);
@@ -455,12 +532,11 @@ app.get("/connect", async (req, res) => {
   try {
     latestQR = null;
     isConnected = false;
+    isStarting = false;
 
-    if (sockInstance) {
-      try {
-        sockInstance.end();
-      } catch (e) {}
-    }
+    clearReconnectTimer();
+
+    await stopSocket();
 
     await fs.promises.rm("session", {
       recursive: true,
@@ -474,6 +550,8 @@ app.get("/connect", async (req, res) => {
       message: "Session lama dihapus, membuat QR baru",
     });
   } catch (err) {
+    console.log("CONNECT ERROR:", err?.message);
+
     res.status(500).json({
       success: false,
       message: err?.message || "Gagal membuat QR",
@@ -484,11 +562,21 @@ app.get("/connect", async (req, res) => {
 app.get("/logout", async (req, res) => {
   try {
     if (sockInstance) {
-      await sockInstance.logout();
+      try {
+        await sockInstance.logout();
+      } catch {}
     }
+
+    await stopSocket();
 
     latestQR = null;
     isConnected = false;
+    isStarting = false;
+
+    await fs.promises.rm("session", {
+      recursive: true,
+      force: true,
+    });
 
     res.json({
       success: true,
