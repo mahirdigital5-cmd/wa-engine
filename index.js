@@ -985,9 +985,9 @@ async function startBot() {
             return incomingText === normalizeText(t.keyword);
           });
 
-          if (exactMatches.length > 0) {
-            return uniqueTriggers(exactMatches).slice(0, 1);
-          }
+          const priceMatches = isPriceQuestion(incomingText)
+            ? activeList.filter((t) => isPriceTrigger(normalizeText(t.keyword)))
+            : [];
 
           const containsMatches = activeList.filter((t) => {
             const keyword = normalizeText(t.keyword);
@@ -996,25 +996,49 @@ async function startBot() {
             return incomingText.includes(keyword);
           });
 
-          if (containsMatches.length > 0) {
-            const sorted = containsMatches.sort((a, b) => {
-              const aIndex = incomingText.indexOf(normalizeText(a.keyword));
-              const bIndex = incomingText.indexOf(normalizeText(b.keyword));
+          const merged = uniqueTriggers([
+            ...exactMatches,
+            ...priceMatches,
+            ...containsMatches,
+          ]);
 
-              const safeAIndex = aIndex === -1 ? Number.MAX_SAFE_INTEGER : aIndex;
-              const safeBIndex = bIndex === -1 ? Number.MAX_SAFE_INTEGER : bIndex;
-
-              if (safeAIndex !== safeBIndex) {
-                return safeAIndex - safeBIndex;
-              }
-
-              return normalizeText(b.keyword).length - normalizeText(a.keyword).length;
-            });
-
-            return uniqueTriggers(sorted).slice(0, 1);
+          if (merged.length === 0) {
+            return [];
           }
 
-          return [];
+          function getFlowEntryOrderIndex(trigger) {
+            const keyword = normalizeText(trigger.keyword);
+
+            const directIndex = incomingText.indexOf(keyword);
+            if (directIndex !== -1) return directIndex;
+
+            for (let i = 0; i < incomingSegments.length; i++) {
+              const segment = incomingSegments[i];
+
+              if (isPriceTrigger(keyword) && isPriceQuestion(segment)) {
+                return i;
+              }
+
+              if (segmentMatchesKeyword(segment, keyword)) {
+                return i;
+              }
+            }
+
+            return Number.MAX_SAFE_INTEGER;
+          }
+
+          const sorted = merged.sort((a, b) => {
+            const aIndex = getFlowEntryOrderIndex(a);
+            const bIndex = getFlowEntryOrderIndex(b);
+
+            if (aIndex !== bIndex) {
+              return aIndex - bIndex;
+            }
+
+            return normalizeText(b.keyword).length - normalizeText(a.keyword).length;
+          });
+
+          return uniqueTriggers(sorted).slice(0, 1);
         }
 
         function getFlowIdValue(value) {
@@ -1039,6 +1063,17 @@ async function startBot() {
 
           if (firstFlowEntry?.flow_id) {
             await updateSessionFlow(phone, firstFlowEntry.flow_id);
+
+            const triggersInEntryFlow = triggers.filter((t) => {
+              return getFlowIdValue(t.flow_id) === getFlowIdValue(firstFlowEntry.flow_id);
+            });
+
+            const additionalFound = matchTriggers(triggersInEntryFlow);
+
+            foundList = uniqueTriggers([
+              ...foundList,
+              ...additionalFound,
+            ]);
           }
         }
 
@@ -1049,10 +1084,7 @@ async function startBot() {
           const activeFlowId = getFlowIdValue(session.flow_id);
 
           const triggersInActiveFlow = triggers.filter((t) => {
-            return (
-              getFlowIdValue(t.flow_id) === activeFlowId &&
-              t.is_flow_entry !== true
-            );
+            return getFlowIdValue(t.flow_id) === activeFlowId;
           });
 
           foundList = matchTriggers(triggersInActiveFlow);
@@ -1096,6 +1128,38 @@ async function startBot() {
         }
 
         foundList = uniqueTriggers(foundList);
+
+        function getFinalTriggerOrderIndex(trigger) {
+          const keyword = normalizeText(trigger.keyword);
+
+          const directIndex = incomingText.indexOf(keyword);
+          if (directIndex !== -1) return directIndex;
+
+          for (let i = 0; i < incomingSegments.length; i++) {
+            const segment = incomingSegments[i];
+
+            if (isPriceTrigger(keyword) && isPriceQuestion(segment)) {
+              return i;
+            }
+
+            if (segmentMatchesKeyword(segment, keyword)) {
+              return i;
+            }
+          }
+
+          return Number.MAX_SAFE_INTEGER;
+        }
+
+        foundList = foundList.sort((a, b) => {
+          const aIndex = getFinalTriggerOrderIndex(a);
+          const bIndex = getFinalTriggerOrderIndex(b);
+
+          if (aIndex !== bIndex) {
+            return aIndex - bIndex;
+          }
+
+          return normalizeText(b.keyword).length - normalizeText(a.keyword).length;
+        });
 
         if (session?.flow_id) {
           const activeFlowId = getFlowIdValue(session.flow_id);
