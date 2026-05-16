@@ -124,6 +124,90 @@ function getMediaList(found) {
   return [];
 }
 
+function getMediaResponseIndex(media) {
+  const value = Number(media?.responseIndex);
+
+  if (Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+
+  return null;
+}
+
+async function sendMedia(sock, jid, media) {
+  const mediaUrl = String(media.url || "").trim();
+  const mediaType = String(media.type || "image").toLowerCase();
+
+  if (!mediaUrl) return;
+
+  if (mediaType === "video") {
+    await sock.sendMessage(jid, {
+      video: {
+        url: mediaUrl,
+      },
+    });
+
+    console.log("VIDEO DIKIRIM:", mediaUrl);
+  } else {
+    await sock.sendMessage(jid, {
+      image: {
+        url: mediaUrl,
+      },
+    });
+
+    console.log("GAMBAR DIKIRIM:", mediaUrl);
+  }
+}
+
+async function sendResponseWithMedia(sock, jid, responseParts, mediaList) {
+  const legacyMedia = mediaList.filter(
+    (media) => getMediaResponseIndex(media) === null
+  );
+
+  const indexedMedia = mediaList.filter(
+    (media) => getMediaResponseIndex(media) !== null
+  );
+
+  for (const media of legacyMedia) {
+    await sendMedia(sock, jid, media);
+  }
+
+  for (let i = 0; i < responseParts.length; i++) {
+    const mediaForAnswer = indexedMedia.filter(
+      (media) => getMediaResponseIndex(media) === i
+    );
+
+    for (const media of mediaForAnswer) {
+      await sendMedia(sock, jid, media);
+    }
+
+    const part = responseParts[i];
+
+    if (part) {
+      await sock.sendMessage(jid, {
+        text: part,
+      });
+
+      console.log("BALASAN TEXT DIKIRIM:", part);
+    }
+  }
+
+  const extraMedia = indexedMedia.filter((media) => {
+    const index = getMediaResponseIndex(media);
+    return index >= responseParts.length;
+  });
+
+  for (const media of extraMedia) {
+    await sendMedia(sock, jid, media);
+  }
+
+  if (responseParts.length === 0 && indexedMedia.length > 0) {
+    for (const media of indexedMedia) {
+      await sendMedia(sock, jid, media);
+    }
+  }
+}
+
 async function safeJsonFetch(url, options = {}) {
   const res = await fetch(url, options);
   const text = await res.text();
@@ -462,63 +546,27 @@ async function startBot() {
           const responseParts = getResponseParts(found.response);
 
           if (mediaList.length > 0) {
-            for (let i = 0; i < mediaList.length; i++) {
-              const media = mediaList[i];
-              const mediaUrl = String(media.url || "").trim();
-              const mediaType = String(media.type || "image").toLowerCase();
-
-              if (!mediaUrl) continue;
-
-              if (mediaType === "video") {
-                await sock.sendMessage(msg.key.remoteJid, {
-                  video: {
-                    url: mediaUrl,
-                  },
-                });
-
-                console.log("VIDEO DIKIRIM:", mediaUrl);
-              } else {
-                await sock.sendMessage(msg.key.remoteJid, {
-                  image: {
-                    url: mediaUrl,
-                  },
-                });
-
-                console.log("GAMBAR DIKIRIM:", mediaUrl);
-              }
-            }
-
-            for (const part of responseParts) {
-              await sock.sendMessage(msg.key.remoteJid, {
-                text: part,
-              });
-
-              console.log("BALASAN TEXT DIKIRIM:", part);
-            }
+            await sendResponseWithMedia(
+              sock,
+              msg.key.remoteJid,
+              responseParts,
+              mediaList
+            );
           } else if (found.image && String(found.image).trim() !== "") {
-            await sock.sendMessage(msg.key.remoteJid, {
-              image: {
+            await sendResponseWithMedia(sock, msg.key.remoteJid, responseParts, [
+              {
+                type: "image",
                 url: String(found.image).trim(),
+                responseIndex: 0,
               },
-            });
-
-            console.log("GAMBAR LAMA DIKIRIM");
-
-            for (const part of responseParts) {
-              await sock.sendMessage(msg.key.remoteJid, {
-                text: part,
-              });
-
-              console.log("BALASAN TEXT DIKIRIM:", part);
-            }
+            ]);
           } else {
-            for (const part of responseParts) {
-              await sock.sendMessage(msg.key.remoteJid, {
-                text: part,
-              });
-
-              console.log("BALASAN TEXT DIKIRIM:", part);
-            }
+            await sendResponseWithMedia(
+              sock,
+              msg.key.remoteJid,
+              responseParts,
+              []
+            );
           }
 
           await new Promise((resolve) => setTimeout(resolve, 700));
