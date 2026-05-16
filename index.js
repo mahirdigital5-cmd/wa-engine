@@ -32,6 +32,8 @@ let latestQR = null;
 let isConnected = false;
 let isStarting = false;
 let reconnectTimer = null;
+const followupTimers = new Map();
+const followupStates = new Map();
 
 const TRIGGER_API = "https://chat-bot-nexis.vercel.app/api/triggers";
 
@@ -208,6 +210,103 @@ async function sendResponseWithMedia(sock, jid, responseParts, mediaList) {
   }
 }
 
+function getFollowupList(found) {
+  if (Array.isArray(found?.followups)) {
+    return found.followups.filter((item) => item?.active !== false && item?.message);
+  }
+
+  if (typeof found?.followups === "string") {
+    try {
+      const parsed = JSON.parse(found.followups);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item) => item?.active !== false && item?.message);
+      }
+    } catch (err) {
+      console.log("FOLLOWUP JSON INVALID:", err?.message);
+      return [];
+    }
+  }
+
+  return [];
+}
+
+function cancelFollowups(jid) {
+  const timers = followupTimers.get(jid) || [];
+
+  for (const timer of timers) {
+    clearTimeout(timer);
+  }
+
+  followupTimers.delete(jid);
+  followupStates.delete(jid);
+
+  if (timers.length > 0) {
+    console.log("FOLLOW UP DIBATALKAN KARENA CUSTOMER MEMBALAS:", jid);
+  }
+}
+
+function scheduleFollowups(sock, jid, found) {
+  const followups = getFollowupList(found);
+
+  if (followups.length === 0) return;
+
+  cancelFollowups(jid);
+
+  const token = `${Date.now()}-${Math.random()}`;
+  const timers = [];
+
+  followupStates.set(jid, {
+    token,
+    triggerId: found.id,
+  });
+
+  let accumulatedDelayMs = 0;
+
+  followups.forEach((followup, index) => {
+    const delayMinutes = Number(followup.delayMinutes) > 0
+      ? Number(followup.delayMinutes)
+      : 1;
+
+    accumulatedDelayMs += delayMinutes * 60 * 1000;
+
+    const timer = setTimeout(async () => {
+      try {
+        const state = followupStates.get(jid);
+
+        if (!state || state.token !== token) {
+          console.log("FOLLOW UP SKIP KARENA STATE BERUBAH:", jid);
+          return;
+        }
+
+        await sock.sendMessage(jid, {
+          text: String(followup.message || "").trim(),
+        });
+
+        console.log(
+          `FOLLOW UP ${index + 1} DIKIRIM SETELAH ${delayMinutes} MENIT:`,
+          jid
+        );
+
+        if (index === followups.length - 1) {
+          followupTimers.delete(jid);
+          followupStates.delete(jid);
+        }
+      } catch (err) {
+        console.log("FOLLOW UP ERROR:", err?.message);
+      }
+    }, accumulatedDelayMs);
+
+    timers.push(timer);
+  });
+
+  followupTimers.set(jid, timers);
+
+  console.log("FOLLOW UP DIJADWALKAN:", {
+    jid,
+    total: followups.length,
+  });
+}
+
 async function safeJsonFetch(url, options = {}) {
   const res = await fetch(url, options);
   const text = await res.text();
@@ -363,6 +462,8 @@ async function startBot() {
         if (!text) return;
 
         const phone = msg.key.remoteJid;
+
+        cancelFollowups(phone);
 
         console.log("PESAN MASUK:", text);
         console.log("DARI NOMOR:", phone);
@@ -568,6 +669,8 @@ async function startBot() {
               []
             );
           }
+
+          scheduleFollowups(sock, msg.key.remoteJid, found);
 
           await new Promise((resolve) => setTimeout(resolve, 700));
         }
