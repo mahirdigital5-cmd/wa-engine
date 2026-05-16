@@ -44,6 +44,11 @@ const pendingMessageBuffers = new Map();
 // sebelum jawaban trigger sebelumnya selesai terkirim semua.
 const messageProcessQueues = new Map();
 
+// Riwayat chat pendek per nomor.
+// Dipakai hanya sebagai konteks bantu, bukan untuk memaksa trigger keluar.
+const recentChatHistories = new Map();
+const MAX_RECENT_CHAT_HISTORY = 10;
+
 const AFFIRMATIVE_WORDS = [
   "iya",
   "ya",
@@ -120,6 +125,118 @@ function isPriceTrigger(keyword = "") {
   ];
 
   return priceTriggerWords.some((word) => normalized.includes(word));
+}
+
+function isShippingQuestion(text = "") {
+  const normalized = normalizeText(text);
+
+  const shippingWords = [
+    "ongkir",
+    "ongkos kirim",
+    "ongkos",
+    "kirim",
+    "pengiriman",
+    "cod",
+    "alamat",
+    "area",
+    "wilayah",
+    "daerah",
+    "kecamatan",
+    "kec",
+    "kota",
+    "kabupaten",
+    "kab",
+    "provinsi",
+    "balikpapan",
+    "samarinda",
+  ];
+
+  const hasShippingWord = shippingWords.some((word) =>
+    normalized.includes(normalizeText(word))
+  );
+
+  // Contoh: "ke balikpapan tengah berapa ka"
+  const startsWithDestination =
+    /\bke\s+[a-zA-Z\s]+\b/.test(normalized) && normalized.includes("berapa");
+
+  return hasShippingWord || startsWithDestination;
+}
+
+function isShippingTrigger(keyword = "") {
+  const normalized = normalizeText(keyword);
+
+  const shippingTriggerWords = [
+    "ongkir",
+    "ongkos kirim",
+    "ongkos",
+    "kirim",
+    "pengiriman",
+    "cod",
+    "alamat",
+    "area",
+    "wilayah",
+    "daerah",
+  ];
+
+  return shippingTriggerWords.some((word) =>
+    normalized.includes(normalizeText(word))
+  );
+}
+
+function isProductPriceQuestion(text = "") {
+  const normalized = normalizeText(text);
+
+  // Kalau chat sedang membahas ongkir/area, jangan langsung dianggap harga produk.
+  if (isShippingQuestion(normalized)) return false;
+
+  const productPricePatterns = [
+    "harga",
+    "harganya",
+    "berapa harga",
+    "berapa harganya",
+    "price",
+    "tarif produk",
+    "biaya produk",
+  ];
+
+  return productPricePatterns.some((pattern) =>
+    normalized.includes(normalizeText(pattern))
+  );
+}
+
+function isProductPriceTrigger(keyword = "") {
+  const normalized = normalizeText(keyword);
+
+  if (isShippingTrigger(normalized)) return false;
+
+  return isPriceTrigger(normalized);
+}
+
+function rememberRecentChat(phone, text) {
+  const current = recentChatHistories.get(phone) || [];
+  const next = [
+    ...current,
+    {
+      text: String(text || ""),
+      normalized: normalizeText(text),
+      at: Date.now(),
+    },
+  ].slice(-MAX_RECENT_CHAT_HISTORY);
+
+  recentChatHistories.set(phone, next);
+}
+
+function getRecentChatContext(phone, currentText = "") {
+  const history = recentChatHistories.get(phone) || [];
+  const currentNormalized = normalizeText(currentText);
+
+  return history
+    .map((item) => item.normalized)
+    .filter(Boolean)
+    .filter((item, index, arr) => arr.indexOf(item) === index)
+    .filter((item) => item !== currentNormalized)
+    .slice(-MAX_RECENT_CHAT_HISTORY)
+    .join(" ");
 }
 
 function getResponseParts(response = "") {
@@ -773,6 +890,8 @@ async function startBot() {
 
         const phone = msg.key.remoteJid;
 
+        rememberRecentChat(phone, text);
+
         cancelFollowups(phone);
 
         console.log("PESAN MASUK:", text);
@@ -839,6 +958,10 @@ async function startBot() {
         console.log("SESSION AKTIF:", session);
 
         const incomingText = normalizeText(text);
+        const recentContextText = getRecentChatContext(phone, text);
+        const incomingTextWithContext = normalizeText(
+          [recentContextText, incomingText].filter(Boolean).join(" ")
+        );
 
         function splitIncomingSegments(value) {
           return String(value || "")
@@ -882,10 +1005,19 @@ async function startBot() {
             "hello",
             "permisi",
             "dong",
+            "mau",
+            "cek",
+            "boleh",
+            "bisa",
+            "ga",
+            "gak",
+            "nggak",
+            "ngga",
+            "dong",
           ];
 
-          function getImportantWords(text) {
-            return normalizeText(text)
+          function getImportantWords(value) {
+            return normalizeText(value)
               .split(" ")
               .map((word) => word.trim())
               .filter(Boolean)
@@ -893,118 +1025,175 @@ async function startBot() {
               .filter((word) => !ignoredWords.includes(word));
           }
 
-          const incomingWords = getImportantWords(incomingText);
+          function getKnownShippingAreas(triggerList) {
+            const areas = [];
 
-          const priceMatches = isPriceQuestion(incomingText)
-            ? activeList
-                .filter((t) => isPriceTrigger(normalizeText(t.keyword)))
-                .slice(0, 1)
-            : [];
+            for (const trigger of triggerList) {
+              const checkout = getFlowCheckout(flows, trigger.flow_id);
+              const shippingByArea = checkout?.shippingByArea || {};
 
-          const exactMatches = activeList.filter((t) => {
-            if (t.type !== "Sama Persis") return false;
-            return incomingText === normalizeText(t.keyword);
-          });
-
-          const containsMatches = activeList.filter((t) => {
-            if (t.type === "Sama Persis") return false;
-
-            const keyword = normalizeText(t.keyword);
-
-            if (!keyword) return false;
-
-            const keywordWords = getImportantWords(keyword);
-
-            if (keywordWords.length === 0) {
-              return false;
-            }
-
-            return keywordWords.every((word) =>
-              incomingWords.includes(word)
-            );
-          });
-
-          const wordMatches = activeList.filter((t) => {
-            if (t.type === "Sama Persis") return false;
-
-            const keywordWords = getImportantWords(t.keyword);
-
-            if (keywordWords.length === 0) {
-              return false;
-            }
-
-            const matchedWords = keywordWords.filter((word) =>
-              incomingWords.includes(word)
-            );
-
-            return matchedWords.length >= 2;
-          });
-
-          const merged = uniqueTriggers([
-            ...priceMatches,
-            ...exactMatches,
-            ...containsMatches,
-            ...wordMatches,
-          ]);
-
-          // Urutan mengikuti posisi trigger di chat customer.
-          // Jadi: "berapa? bisa cod?"
-          // maka trigger "berapa/harga" dijawab dulu sampai semua jawabannya selesai,
-          // baru lanjut trigger "cod".
-          function getTriggerOrderIndex(trigger) {
-            const keyword = normalizeText(trigger.keyword);
-
-            if (!keyword) return Number.MAX_SAFE_INTEGER;
-
-            const directIndex = incomingText.indexOf(keyword);
-            if (directIndex !== -1) return directIndex;
-
-            const keywordWords = getImportantWords(keyword);
-
-            for (let i = 0; i < incomingSegments.length; i++) {
-              const segment = incomingSegments[i];
-              const segmentWords = getImportantWords(segment);
-
-              if (
-                isPriceTrigger(keyword) &&
-                isPriceQuestion(segment)
-              ) {
-                return i;
-              }
-
-              if (segmentMatchesKeyword(segment, keyword)) {
-                return i;
-              }
-
-              if (
-                keywordWords.length > 0 &&
-                keywordWords.every((word) => segmentWords.includes(word))
-              ) {
-                return i;
-              }
-
-              const matchedWords = keywordWords.filter((word) =>
-                segmentWords.includes(word)
-              );
-
-              if (matchedWords.length >= 2) {
-                return i;
+              for (const area of Object.keys(shippingByArea)) {
+                const normalizedArea = normalizeText(area);
+                if (normalizedArea) areas.push(normalizedArea);
               }
             }
 
-            return Number.MAX_SAFE_INTEGER;
+            return [...new Set(areas)];
           }
 
-          return merged.sort((a, b) => {
-            const aIndex = getTriggerOrderIndex(a);
-            const bIndex = getTriggerOrderIndex(b);
+          function textContainsKnownShippingArea(value, triggerList) {
+            const normalized = normalizeText(value);
+            const areas = getKnownShippingAreas(triggerList);
 
-            if (aIndex !== bIndex) {
-              return aIndex - bIndex;
+            return areas.some((area) => normalized.includes(area));
+          }
+
+          function getTriggerScore(trigger, segment = incomingText) {
+            const keyword = normalizeText(trigger.keyword);
+            const normalizedSegment = normalizeText(segment);
+
+            if (!keyword || !normalizedSegment) return 0;
+
+            if (trigger.type === "Sama Persis") {
+              return normalizedSegment === keyword ? 100 : 0;
             }
 
-            return normalizeText(b.keyword).length - normalizeText(a.keyword).length;
-          });
+            const keywordWords = getImportantWords(keyword);
+            const segmentWords = getImportantWords(normalizedSegment);
+
+            if (keywordWords.length === 0 || segmentWords.length === 0) {
+              return 0;
+            }
+
+            const directKeywordMatch = normalizedSegment.includes(keyword);
+            const matchedWords = keywordWords.filter((word) =>
+              segmentWords.includes(word)
+            );
+
+            let score = 0;
+
+            if (directKeywordMatch) score += 70;
+
+            score += matchedWords.length * 18;
+
+            const coverage = matchedWords.length / keywordWords.length;
+            if (coverage >= 1) score += 35;
+            else if (coverage >= 0.67) score += 22;
+            else if (coverage >= 0.5) score += 10;
+
+            // Jangan biarkan kata umum "berapa" sendirian memilih trigger harga produk.
+            if (
+              isProductPriceTrigger(keyword) &&
+              !isProductPriceQuestion(normalizedSegment)
+            ) {
+              score -= 60;
+            }
+
+            // Kalau pertanyaan mengarah ke area/ongkir, trigger harga produk diturunkan.
+            if (
+              (isShippingQuestion(normalizedSegment) ||
+                textContainsKnownShippingArea(normalizedSegment, activeList)) &&
+              isProductPriceTrigger(keyword)
+            ) {
+              score -= 80;
+            }
+
+            // Kalau pertanyaan ongkir/area, trigger ongkir dibantu naik.
+            if (
+              (isShippingQuestion(normalizedSegment) ||
+                textContainsKnownShippingArea(normalizedSegment, activeList)) &&
+              isShippingTrigger(keyword)
+            ) {
+              score += 35;
+            }
+
+            // Jika trigger punya banyak kata, minimal harus ada 2 kata penting yang match
+            // kecuali keyword lengkapnya benar-benar muncul.
+            if (keywordWords.length >= 2 && matchedWords.length < 2 && !directKeywordMatch) {
+              score = Math.min(score, 25);
+            }
+
+            return Math.max(score, 0);
+          }
+
+          function getBestSegmentScore(trigger) {
+            const segmentScores = incomingSegments.map((segment, index) => ({
+              index,
+              score: getTriggerScore(trigger, segment),
+            }));
+
+            const fullScore = getTriggerScore(trigger, incomingText);
+
+            let best = {
+              index: Number.MAX_SAFE_INTEGER,
+              score: fullScore,
+            };
+
+            for (const item of segmentScores) {
+              if (item.score > best.score) {
+                best = item;
+              }
+            }
+
+            // Riwayat 10 chat terakhir hanya untuk bantu konteks ringan.
+            // Tidak boleh membuat trigger keluar kalau chat saat ini skornya lemah.
+            const contextScore = recentContextText
+              ? getTriggerScore(trigger, incomingTextWithContext)
+              : 0;
+
+            if (best.score >= 55 && contextScore > best.score) {
+              best.score = Math.min(contextScore, best.score + 15);
+            }
+
+            return best;
+          }
+
+          const scored = activeList
+            .map((trigger) => {
+              const best = getBestSegmentScore(trigger);
+
+              return {
+                trigger,
+                score: best.score,
+                orderIndex: best.index,
+              };
+            })
+            .filter((item) => {
+              const keyword = normalizeText(item.trigger.keyword);
+
+              // Ambang aman: kalau tidak cukup yakin, jangan kirim apa-apa.
+              if (item.trigger.type === "Sama Persis") return item.score >= 100;
+
+              if (isShippingTrigger(keyword)) return item.score >= 55;
+              if (isProductPriceTrigger(keyword)) return item.score >= 65;
+
+              return item.score >= 60;
+            })
+            .sort((a, b) => {
+              if (a.orderIndex !== b.orderIndex) {
+                return a.orderIndex - b.orderIndex;
+              }
+
+              if (a.score !== b.score) {
+                return b.score - a.score;
+              }
+
+              return (
+                normalizeText(b.trigger.keyword).length -
+                normalizeText(a.trigger.keyword).length
+              );
+            });
+
+          console.log(
+            "SKOR TRIGGER:",
+            scored.map((item) => ({
+              id: item.trigger.id,
+              keyword: item.trigger.keyword,
+              score: item.score,
+            }))
+          );
+
+          return uniqueTriggers(scored.map((item) => item.trigger));
         }
 
         function matchFlowEntryTriggers(list) {
@@ -1014,8 +1203,8 @@ async function startBot() {
             return incomingText === normalizeText(t.keyword);
           });
 
-          const priceMatches = isPriceQuestion(incomingText)
-            ? activeList.filter((t) => isPriceTrigger(normalizeText(t.keyword)))
+          const priceMatches = isProductPriceQuestion(incomingText)
+            ? activeList.filter((t) => isProductPriceTrigger(normalizeText(t.keyword)))
             : [];
 
           const containsMatches = activeList.filter((t) => {
@@ -1044,7 +1233,7 @@ async function startBot() {
             for (let i = 0; i < incomingSegments.length; i++) {
               const segment = incomingSegments[i];
 
-              if (isPriceTrigger(keyword) && isPriceQuestion(segment)) {
+              if (isProductPriceTrigger(keyword) && isProductPriceQuestion(segment)) {
                 return i;
               }
 
@@ -1167,7 +1356,7 @@ async function startBot() {
           for (let i = 0; i < incomingSegments.length; i++) {
             const segment = incomingSegments[i];
 
-            if (isPriceTrigger(keyword) && isPriceQuestion(segment)) {
+            if (isProductPriceTrigger(keyword) && isProductPriceQuestion(segment)) {
               return i;
             }
 
