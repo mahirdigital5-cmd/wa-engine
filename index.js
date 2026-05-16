@@ -483,6 +483,43 @@ async function startBot() {
         function matchTriggers(list) {
           const activeList = list.filter((t) => t.active);
 
+          const ignoredWords = [
+            "kak",
+            "ka",
+            "kaka",
+            "min",
+            "admin",
+            "gan",
+            "sis",
+            "bro",
+            "bos",
+            "bang",
+            "mas",
+            "mba",
+            "mbak",
+            "ya",
+            "yah",
+            "oke",
+            "ok",
+            "sip",
+            "halo",
+            "hai",
+            "hello",
+            "permisi",
+            "dong",
+          ];
+
+          function getImportantWords(text) {
+            return normalizeText(text)
+              .split(" ")
+              .map((word) => word.trim())
+              .filter(Boolean)
+              .filter((word) => word.length >= 3)
+              .filter((word) => !ignoredWords.includes(word));
+          }
+
+          const incomingWords = getImportantWords(incomingText);
+
           const priceMatches = activeList.filter((t) => {
             const keyword = normalizeText(t.keyword);
             return isPriceTrigger(keyword) && isPriceQuestion(incomingText);
@@ -497,16 +534,34 @@ async function startBot() {
             if (t.type === "Sama Persis") return false;
 
             const keyword = normalizeText(t.keyword);
-            return keyword && incomingText.includes(keyword);
+
+            if (!keyword) return false;
+
+            const keywordWords = getImportantWords(keyword);
+
+            if (keywordWords.length === 0) {
+              return false;
+            }
+
+            return keywordWords.every((word) =>
+              incomingWords.includes(word)
+            );
           });
 
           const wordMatches = activeList.filter((t) => {
             if (t.type === "Sama Persis") return false;
 
-            const keyword = normalizeText(t.keyword);
-            const words = keyword.split(" ").filter(Boolean);
+            const keywordWords = getImportantWords(t.keyword);
 
-            return words.some((word) => incomingText.includes(word));
+            if (keywordWords.length === 0) {
+              return false;
+            }
+
+            const matchedWords = keywordWords.filter((word) =>
+              incomingWords.includes(word)
+            );
+
+            return matchedWords.length >= 2;
           });
 
           return uniqueTriggers([
