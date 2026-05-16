@@ -370,7 +370,6 @@ function getFlowCheckout(flows, flowId) {
     priceExtra: Number(checkout.priceExtra) || 0,
     defaultShipping: Number(checkout.defaultShipping) || 0,
     shippingByArea: checkout.shippingByArea || {},
-    templates: checkout.templates || {},
   };
 }
 
@@ -521,31 +520,27 @@ function getCheckoutVariables(checkout, state = {}) {
   };
 }
 
-function renderCheckoutTemplate(template, checkout, state = {}, fallback = "") {
-  const source = String(template || "").trim() || fallback;
+function renderCheckoutPlaceholder(text, checkout, state = {}) {
+  if (!checkout) return text;
+
   const variables = getCheckoutVariables(checkout, state);
 
-  return source.replace(/\[([a-zA-Z_]+)\]/g, (match, key) => {
+  return String(text || "").replace(/\[([a-zA-Z_]+)\]/g, (match, key) => {
     return variables[key] !== undefined ? String(variables[key]) : match;
   });
 }
 
-function getCheckoutTemplate(checkout, key, fallback = "") {
-  return String(checkout?.templates?.[key] || "").trim() || fallback;
-}
-
 function buildTotalMessage(checkout, qty, area) {
-  return renderCheckoutTemplate(
-    getCheckoutTemplate(checkout, "total"),
-    checkout,
-    { qty, area },
+  return renderCheckoutPlaceholder(
     [
       `baik kak.. untuk pengiriman ke [area]`,
       `[produk] [qty] pcs = [subtotal]`,
       `ongkir = [ongkir]`,
       ``,
       `totalnya [total]`,
-    ].join("\n")
+    ].join("\n"),
+    checkout,
+    { qty, area }
   );
 }
 
@@ -623,9 +618,7 @@ async function handleCheckoutMessage(sock, jid, text, session, flows) {
     const qty = extractQty(text);
 
     if (!qty) {
-      await sock.sendMessage(jid, {
-        text: getCheckoutTemplate(checkout, "askQty", "mau pesan berapa pcs ya kak?"),
-      });
+      await sock.sendMessage(jid, { text: "mau pesan berapa pcs ya kak?" });
       return true;
     }
 
@@ -645,9 +638,7 @@ async function handleCheckoutMessage(sock, jid, text, session, flows) {
   if (checkoutState?.step === "awaiting_total_confirm") {
     if (isNegative(text)) {
       await updateSessionCheckout(jid, {});
-      await sock.sendMessage(jid, {
-        text: getCheckoutTemplate(checkout, "cancel", "baik kak, tidak apa-apa 🙏"),
-      });
+      await sock.sendMessage(jid, { text: "baik kak, tidak apa-apa 🙏" });
       return true;
     }
 
@@ -662,9 +653,7 @@ async function handleCheckoutMessage(sock, jid, text, session, flows) {
         step: "awaiting_name",
       });
 
-      await sock.sendMessage(jid, {
-        text: getCheckoutTemplate(checkout, "askName", "nama penerimanya siapa ya kak?"),
-      });
+      await sock.sendMessage(jid, { text: "nama penerimanya siapa ya kak?" });
       return true;
     }
 
@@ -696,17 +685,13 @@ async function handleCheckoutMessage(sock, jid, text, session, flows) {
   if (checkoutState?.step === "awaiting_final_confirm") {
     if (isNegative(text)) {
       await updateSessionCheckout(jid, {});
-      await sock.sendMessage(jid, {
-        text: getCheckoutTemplate(checkout, "cancel", "baik kak, pesanannya belum kami lanjutkan ya 🙏"),
-      });
+      await sock.sendMessage(jid, { text: "baik kak, pesanannya belum kami lanjutkan ya 🙏" });
       return true;
     }
 
     if (isAffirmative(text)) {
       await updateSessionCheckout(jid, {});
-      await sock.sendMessage(jid, {
-        text: getCheckoutTemplate(checkout, "done", "siap kak, terima kasih. Pesanannya segera kami proses 🙏"),
-      });
+      await sock.sendMessage(jid, { text: "siap kak, terima kasih. Pesanannya segera kami proses 🙏" });
       return true;
     }
 
@@ -731,9 +716,7 @@ async function handleCheckoutMessage(sock, jid, text, session, flows) {
     await updateSessionCheckout(jid, baseState);
 
     if (!qty) {
-      await sock.sendMessage(jid, {
-        text: getCheckoutTemplate(checkout, "askQty", "baik kak, mau pesan berapa pcs?"),
-      });
+      await sock.sendMessage(jid, { text: "baik kak, mau pesan berapa pcs?" });
       return true;
     }
 
@@ -1192,7 +1175,17 @@ async function startBot() {
 
         for (const found of foundList) {
           const mediaList = getMediaList(found);
-          const responseParts = getResponseParts(found.response);
+          const triggerCheckout = getFlowCheckout(flows, found.flow_id);
+          const checkoutStateForTrigger = {
+            qty: extractQty(text) || 1,
+            area: triggerCheckout ? extractArea(text, triggerCheckout) : "",
+            address: cleanAddressText(text),
+            name: extractName(text),
+          };
+
+          const responseParts = getResponseParts(found.response).map((part) =>
+            renderCheckoutPlaceholder(part, triggerCheckout, checkoutStateForTrigger)
+          );
 
           if (mediaList.length > 0) {
             await sendResponseWithMedia(
@@ -1218,26 +1211,19 @@ async function startBot() {
             );
           }
 
-          const triggerCheckout = getFlowCheckout(flows, found.flow_id);
-
           if (triggerCheckout && looksLikeAddress(text)) {
             const qty = extractQty(text) || 1;
             const area = extractArea(text, triggerCheckout);
             const address = cleanAddressText(text);
             const name = extractName(text);
 
-            const checkoutState = {
+            await updateSessionCheckout(msg.key.remoteJid, {
               step: "awaiting_total_confirm",
               qty,
               area,
               address,
               name,
               startedAt: new Date().toISOString(),
-            };
-
-            await updateSessionCheckout(msg.key.remoteJid, checkoutState);
-            await sock.sendMessage(msg.key.remoteJid, {
-              text: buildTotalMessage(triggerCheckout, qty, area),
             });
           } else {
             scheduleFollowups(sock, msg.key.remoteJid, found);
