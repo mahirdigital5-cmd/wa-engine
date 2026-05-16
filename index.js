@@ -76,6 +76,7 @@ const NEGATIVE_WORDS = [
 ];
 
 const TRIGGER_API = "https://chat-bot-nexis.vercel.app/api/triggers";
+const ANSWER_SEPARATOR = "\n---JAWABAN_BARU---\n";
 
 function normalizeText(value) {
   return String(value || "")
@@ -239,8 +240,97 @@ function getRecentChatContext(phone, currentText = "") {
     .join(" ");
 }
 
+function hasAreaPlaceholder(value = "") {
+  return normalizeText(value).includes("area");
+}
+
+function keywordHasAreaPlaceholder(keyword = "") {
+  return String(keyword || "").toLowerCase().includes("[area]");
+}
+
+function getAllCheckoutAreas(flows = []) {
+  const areas = [];
+
+  for (const flow of flows || []) {
+    const checkout = parseJsonMaybe(flow?.checkout, {});
+    const shippingByArea = checkout?.shippingByArea || {};
+
+    for (const area of Object.keys(shippingByArea)) {
+      const normalizedArea = normalizeText(area);
+      if (normalizedArea) areas.push(normalizedArea);
+    }
+  }
+
+  return [...new Set(areas)];
+}
+
+function textContainsCheckoutArea(text = "", flows = []) {
+  const normalized = normalizeText(text);
+  const areas = getAllCheckoutAreas(flows);
+
+  return areas.some((area) => normalized.includes(area));
+}
+
+function getAreaPlaceholderRegex(keyword = "") {
+  const escaped = normalizeText(keyword)
+    .replace(/\barea\b/g, "__AREA__")
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/__AREA__/g, "(.+?)")
+    .replace(/\s+/g, "\\s+");
+
+  return new RegExp(`^${escaped}$`, "i");
+}
+
+function matchAreaPlaceholderKeyword(text = "", keyword = "", flows = []) {
+  if (!keywordHasAreaPlaceholder(keyword)) return false;
+
+  const normalizedText = normalizeText(text);
+  const normalizedKeyword = normalizeText(keyword).replace(/\barea\b/g, "").trim();
+
+  const hasKnownArea = textContainsCheckoutArea(normalizedText, flows);
+
+  // Cocokkan pola seperti:
+  // "ke [area]" -> "ke balikpapan tengah"
+  // "[area] berapa" -> "balikpapan tengah berapa"
+  const regex = getAreaPlaceholderRegex(keyword);
+  const regexMatch = regex.test(normalizedText);
+
+  if (regexMatch) return true;
+
+  // Kalau ada kata tetap dari keyword + area yang dikenal, anggap cocok.
+  const fixedWords = normalizedKeyword
+    .split(" ")
+    .map((word) => word.trim())
+    .filter(Boolean)
+    .filter((word) => word !== "area");
+
+  const fixedWordsMatch =
+    fixedWords.length === 0 ||
+    fixedWords.every((word) => normalizedText.includes(word));
+
+  if (hasKnownArea && fixedWordsMatch) return true;
+
+  // Contoh: customer hanya chat "Balikpapan Tengah berapa ka"
+  // keyword: "ke [area]" tetap boleh cocok karena area dikenal + ada kata "berapa".
+  if (hasKnownArea && normalizedText.includes("berapa")) return true;
+
+  return false;
+}
+
 function getResponseParts(response = "") {
-  return String(response || "")
+  const raw = String(response || "");
+
+  // Format baru dari dashboard:
+  // enter biasa tetap bagian dari 1 jawaban, bukan pemecah jawaban.
+  if (raw.includes(ANSWER_SEPARATOR.trim())) {
+    return raw
+      .split(ANSWER_SEPARATOR.trim())
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  // Legacy untuk trigger lama yang belum disimpan ulang.
+  return raw
     .split(/\n+/)
     .map((item) => item.trim())
     .filter(Boolean);
@@ -585,11 +675,20 @@ function extractArea(text, checkout) {
   const normalized = normalizeText(text);
   const shippingByArea = checkout?.shippingByArea || {};
 
+  // Prioritas 1: cocok dengan daftar ongkir per area di checkout.
   for (const area of Object.keys(shippingByArea)) {
     if (normalized.includes(normalizeText(area))) return area;
   }
 
-  const areaPatterns = [
+  // Prioritas 2: pola umum customer.
+  // Contoh:
+  // "ke balikpapan tengah berapa ka"
+  // "ongkir ke samarinda berapa"
+  // "di kecamatan balikpapan tengah"
+  const destinationPatterns = [
+    /(?:ke|di|untuk|tujuan)\s+([a-zA-Z\s]+?)(?:\s+berapa|\s+ongkir|\s+ka|\s+kak|\s+min|$)/i,
+    /(?:ongkir|kirim|cod)\s+(?:ke\s+)?([a-zA-Z\s]+?)(?:\s+berapa|\s+ka|\s+kak|\s+min|$)/i,
+    /([a-zA-Z\s]+?)\s+(?:berapa|ongkir)/i,
     /kecamatan\s+([a-zA-Z\s]+)/i,
     /kec\s+([a-zA-Z\s]+)/i,
     /kota\s+([a-zA-Z\s]+)/i,
@@ -597,10 +696,22 @@ function extractArea(text, checkout) {
     /kab\s+([a-zA-Z\s]+)/i,
   ];
 
-  for (const pattern of areaPatterns) {
+  for (const pattern of destinationPatterns) {
     const match = String(text || "").match(pattern);
     if (match?.[1]) {
-      return normalizeText(match[1]).split(" ").slice(0, 2).join(" ");
+      const cleaned = normalizeText(match[1])
+        .replace(/\b(kak|ka|min|admin|berapa|ongkir|cod)\b/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      if (cleaned) {
+        // Kalau hasil ekstrak mengandung area yang ada di setting, pakai nama settingnya.
+        for (const area of Object.keys(shippingByArea)) {
+          if (cleaned.includes(normalizeText(area))) return area;
+        }
+
+        return cleaned.split(" ").slice(0, 3).join(" ");
+      }
     }
   }
 
@@ -975,6 +1086,11 @@ async function startBot() {
         function segmentMatchesKeyword(segment, keyword) {
           const normalizedKeyword = normalizeText(keyword);
           if (!segment || !normalizedKeyword) return false;
+
+          if (keywordHasAreaPlaceholder(keyword)) {
+            return matchAreaPlaceholderKeyword(segment, keyword, flows);
+          }
+
           return segment.includes(normalizedKeyword);
         }
 
@@ -1053,6 +1169,12 @@ async function startBot() {
             const normalizedSegment = normalizeText(segment);
 
             if (!keyword || !normalizedSegment) return 0;
+
+            if (keywordHasAreaPlaceholder(trigger.keyword)) {
+              return matchAreaPlaceholderKeyword(normalizedSegment, trigger.keyword, flows)
+                ? 95
+                : 0;
+            }
 
             if (trigger.type === "Sama Persis") {
               return normalizedSegment === keyword ? 100 : 0;
@@ -1162,6 +1284,8 @@ async function startBot() {
               const keyword = normalizeText(item.trigger.keyword);
 
               // Ambang aman: kalau tidak cukup yakin, jangan kirim apa-apa.
+              if (keywordHasAreaPlaceholder(item.trigger.keyword)) return item.score >= 80;
+
               if (item.trigger.type === "Sama Persis") return item.score >= 100;
 
               if (isShippingTrigger(keyword)) return item.score >= 55;
@@ -1210,6 +1334,10 @@ async function startBot() {
           const containsMatches = activeList.filter((t) => {
             const keyword = normalizeText(t.keyword);
             if (!keyword) return false;
+
+            if (keywordHasAreaPlaceholder(t.keyword)) {
+              return matchAreaPlaceholderKeyword(incomingText, t.keyword, flows);
+            }
 
             return incomingText.includes(keyword);
           });
@@ -1349,6 +1477,14 @@ async function startBot() {
 
         function getFinalTriggerOrderIndex(trigger) {
           const keyword = normalizeText(trigger.keyword);
+
+          if (keywordHasAreaPlaceholder(trigger.keyword)) {
+            for (let i = 0; i < incomingSegments.length; i++) {
+              if (matchAreaPlaceholderKeyword(incomingSegments[i], trigger.keyword, flows)) {
+                return i;
+              }
+            }
+          }
 
           const directIndex = incomingText.indexOf(keyword);
           if (directIndex !== -1) return directIndex;
