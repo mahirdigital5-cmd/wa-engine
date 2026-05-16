@@ -521,6 +521,7 @@ function getCheckoutVariables(checkout, state = {}) {
     subtotal: formatRupiah(totals.productTotal),
     ongkir: formatRupiah(totals.shipping),
     total: formatRupiah(totals.total),
+    harga: formatRupiah(totals.total),
     nama: state.name || "-",
     alamat: state.address || "-",
     pesanan,
@@ -580,124 +581,8 @@ async function updateSessionCheckout(phone, checkout) {
 }
 
 async function handleCheckoutMessage(sock, jid, text, session, flows) {
-  const checkoutState = parseJsonMaybe(session?.checkout, {});
-  const activeFlowId = session?.flow_id;
-
-  if (!activeFlowId) return false;
-
-  const checkout = getFlowCheckout(flows, activeFlowId);
-  if (!checkout) return false;
-
-  if (checkoutState?.step === "awaiting_qty") {
-    const qty = extractQty(text);
-
-    if (!qty) {
-      await sock.sendMessage(jid, { text: "mau pesan berapa pcs ya kak?" });
-      return true;
-    }
-
-    const area = checkoutState.area || extractArea(checkoutState.address || "", checkout);
-    const nextState = {
-      ...checkoutState,
-      step: "awaiting_total_confirm",
-      qty,
-      area,
-    };
-
-    await updateSessionCheckout(jid, nextState);
-    await sock.sendMessage(jid, { text: buildTotalMessage(checkout, qty, area) });
-    return true;
-  }
-
-  if (checkoutState?.step === "awaiting_total_confirm") {
-    if (isNegative(text)) {
-      await updateSessionCheckout(jid, {});
-      await sock.sendMessage(jid, { text: "baik kak, tidak apa-apa 🙏" });
-      return true;
-    }
-
-    if (!isAffirmative(text)) return false;
-
-    const address = cleanAddressText(checkoutState.address || "");
-    const name = checkoutState.name || extractName(address);
-
-    if (!name) {
-      await updateSessionCheckout(jid, {
-        ...checkoutState,
-        step: "awaiting_name",
-      });
-
-      await sock.sendMessage(jid, { text: "nama penerimanya siapa ya kak?" });
-      return true;
-    }
-
-    const finalState = {
-      ...checkoutState,
-      step: "awaiting_final_confirm",
-      address,
-      name,
-    };
-
-    await updateSessionCheckout(jid, finalState);
-    await sock.sendMessage(jid, { text: buildFinalOrderMessage(checkout, finalState) });
-    return true;
-  }
-
-  if (checkoutState?.step === "awaiting_name") {
-    const finalState = {
-      ...checkoutState,
-      step: "awaiting_final_confirm",
-      name: String(text || "").trim(),
-      address: cleanAddressText(checkoutState.address || ""),
-    };
-
-    await updateSessionCheckout(jid, finalState);
-    await sock.sendMessage(jid, { text: buildFinalOrderMessage(checkout, finalState) });
-    return true;
-  }
-
-  if (checkoutState?.step === "awaiting_final_confirm") {
-    if (isNegative(text)) {
-      await updateSessionCheckout(jid, {});
-      await sock.sendMessage(jid, { text: "baik kak, pesanannya belum kami lanjutkan ya 🙏" });
-      return true;
-    }
-
-    if (isAffirmative(text)) {
-      await updateSessionCheckout(jid, {});
-      await sock.sendMessage(jid, { text: "siap kak, terima kasih. Pesanannya segera kami proses 🙏" });
-      return true;
-    }
-
-    return false;
-  }
-
-  if (looksLikeAddress(text)) {
-    const qty = extractQty(text);
-    const area = extractArea(text, checkout);
-    const address = cleanAddressText(text);
-    const name = extractName(text);
-
-    const baseState = {
-      step: qty ? "awaiting_total_confirm" : "awaiting_qty",
-      qty: qty || null,
-      area,
-      address,
-      name,
-      startedAt: new Date().toISOString(),
-    };
-
-    await updateSessionCheckout(jid, baseState);
-
-    if (!qty) {
-      await sock.sendMessage(jid, { text: "baik kak, mau pesan berapa pcs?" });
-      return true;
-    }
-
-    await sock.sendMessage(jid, { text: buildTotalMessage(checkout, qty, area) });
-    return true;
-  }
-
+  // Semua balasan harus berasal dari trigger yang dibuat di dashboard.
+  // Function ini sengaja tidak mengirim pesan otomatis supaya tidak membuat template sendiri.
   return false;
 }
 
@@ -869,18 +754,6 @@ async function startBot() {
         const triggers = Array.isArray(data.triggers) ? data.triggers : [];
         const flows = Array.isArray(data.flows) ? data.flows : [];
         const session = data.session || null;
-
-        const checkoutHandled = await handleCheckoutMessage(
-          sock,
-          phone,
-          text,
-          session,
-          flows
-        );
-
-        if (checkoutHandled) {
-          return;
-        }
 
         console.log("JUMLAH TRIGGER:", triggers.length);
         console.log("SESSION AKTIF:", session);
@@ -1186,23 +1059,9 @@ async function startBot() {
             );
           }
 
-          if (triggerCheckout && looksLikeAddress(text)) {
-            const qty = extractQty(text) || 1;
-            const area = extractArea(text, triggerCheckout);
-            const address = cleanAddressText(text);
-            const name = extractName(text);
-
-            await updateSessionCheckout(msg.key.remoteJid, {
-              step: "awaiting_total_confirm",
-              qty,
-              area,
-              address,
-              name,
-              startedAt: new Date().toISOString(),
-            });
-          } else {
-            scheduleFollowups(sock, msg.key.remoteJid, found);
-          }
+          // Tidak ada pesan/checkout otomatis di engine.
+          // Follow up tetap hanya dari setting trigger dashboard.
+          scheduleFollowups(sock, msg.key.remoteJid, found);
 
           await new Promise((resolve) => setTimeout(resolve, 700));
         }
