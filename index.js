@@ -871,15 +871,56 @@ async function startBot() {
           // Jadi: "berapa? bisa cod?"
           // maka trigger "berapa/harga" dijawab dulu sampai semua jawabannya selesai,
           // baru lanjut trigger "cod".
+          function getTriggerOrderIndex(trigger) {
+            const keyword = normalizeText(trigger.keyword);
+
+            if (!keyword) return Number.MAX_SAFE_INTEGER;
+
+            const directIndex = incomingText.indexOf(keyword);
+            if (directIndex !== -1) return directIndex;
+
+            const keywordWords = getImportantWords(keyword);
+
+            for (let i = 0; i < incomingSegments.length; i++) {
+              const segment = incomingSegments[i];
+              const segmentWords = getImportantWords(segment);
+
+              if (
+                isPriceTrigger(keyword) &&
+                isPriceQuestion(segment)
+              ) {
+                return i;
+              }
+
+              if (segmentMatchesKeyword(segment, keyword)) {
+                return i;
+              }
+
+              if (
+                keywordWords.length > 0 &&
+                keywordWords.every((word) => segmentWords.includes(word))
+              ) {
+                return i;
+              }
+
+              const matchedWords = keywordWords.filter((word) =>
+                segmentWords.includes(word)
+              );
+
+              if (matchedWords.length >= 2) {
+                return i;
+              }
+            }
+
+            return Number.MAX_SAFE_INTEGER;
+          }
+
           return merged.sort((a, b) => {
-            const aIndex = incomingText.indexOf(normalizeText(a.keyword));
-            const bIndex = incomingText.indexOf(normalizeText(b.keyword));
+            const aIndex = getTriggerOrderIndex(a);
+            const bIndex = getTriggerOrderIndex(b);
 
-            const safeAIndex = aIndex === -1 ? Number.MAX_SAFE_INTEGER : aIndex;
-            const safeBIndex = bIndex === -1 ? Number.MAX_SAFE_INTEGER : bIndex;
-
-            if (safeAIndex !== safeBIndex) {
-              return safeAIndex - safeBIndex;
+            if (aIndex !== bIndex) {
+              return aIndex - bIndex;
             }
 
             return normalizeText(b.keyword).length - normalizeText(a.keyword).length;
@@ -1063,7 +1104,9 @@ async function startBot() {
           // Follow up tetap hanya dari setting trigger dashboard.
           scheduleFollowups(sock, msg.key.remoteJid, found);
 
-          await new Promise((resolve) => setTimeout(resolve, 700));
+          // Tunggu sebentar setelah satu trigger selesai total,
+          // baru lanjut trigger berikutnya.
+          await new Promise((resolve) => setTimeout(resolve, 900));
         }
       } catch (err) {
         console.log("ERROR MESSAGE:", err?.message);
