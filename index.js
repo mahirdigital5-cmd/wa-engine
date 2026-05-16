@@ -35,6 +35,10 @@ let reconnectTimer = null;
 const followupTimers = new Map();
 const followupStates = new Map();
 
+// Buffer chat customer supaya beberapa chat cepat
+// bisa digabung jadi satu proses trigger.
+const pendingMessageBuffers = new Map();
+
 const AFFIRMATIVE_WORDS = [
   "iya",
   "ya",
@@ -747,6 +751,53 @@ async function startBot() {
         console.log("PESAN MASUK:", text);
         console.log("DARI NOMOR:", phone);
 
+        // =========================
+        // BUFFER CHAT CUSTOMER
+        // =========================
+        const existingBuffer = pendingMessageBuffers.get(phone);
+
+        if (existingBuffer?.timer) {
+          clearTimeout(existingBuffer.timer);
+        }
+
+        const combinedTexts = [
+          ...(existingBuffer?.texts || []),
+          text,
+        ];
+
+        const timer = setTimeout(async () => {
+          try {
+            pendingMessageBuffers.delete(phone);
+
+            const mergedText = combinedTexts.join("\n");
+
+            console.log("MERGED TEXT:", mergedText);
+
+            await processIncomingMessage(
+              sock,
+              msg,
+              mergedText,
+              phone
+            );
+          } catch (err) {
+            console.log("BUFFER PROCESS ERROR:", err?.message);
+          }
+        }, 1800);
+
+        pendingMessageBuffers.set(phone, {
+          texts: combinedTexts,
+          timer,
+        });
+
+        return;
+      } catch (err) {
+        console.log("BUFFER ERROR:", err?.message);
+      }
+    });
+
+    async function processIncomingMessage(sock, msg, text, phone) {
+      try {
+
         const data = await safeJsonFetch(
           `${TRIGGER_API}?phone=${encodeURIComponent(phone)}&t=${Date.now()}`
         );
@@ -1113,7 +1164,7 @@ async function startBot() {
         console.log("ERROR STACK:", err?.stack);
         console.log("ERROR FULL:", err);
       }
-    });
+    }
   } catch (err) {
     isStarting = false;
     console.log("GAGAL START BOT:", err?.message);
