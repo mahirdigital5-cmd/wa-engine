@@ -188,6 +188,8 @@ async function sendMedia(sock, jid, media) {
 }
 
 async function sendResponseWithMedia(sock, jid, responseParts, mediaList) {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
   const legacyMedia = mediaList.filter(
     (media) => getMediaResponseIndex(media) === null
   );
@@ -198,6 +200,7 @@ async function sendResponseWithMedia(sock, jid, responseParts, mediaList) {
 
   for (const media of legacyMedia) {
     await sendMedia(sock, jid, media);
+    await wait(450);
   }
 
   for (let i = 0; i < responseParts.length; i++) {
@@ -207,6 +210,7 @@ async function sendResponseWithMedia(sock, jid, responseParts, mediaList) {
 
     for (const media of mediaForAnswer) {
       await sendMedia(sock, jid, media);
+      await wait(450);
     }
 
     const part = responseParts[i];
@@ -217,6 +221,7 @@ async function sendResponseWithMedia(sock, jid, responseParts, mediaList) {
       });
 
       console.log("BALASAN TEXT DIKIRIM:", part);
+      await wait(450);
     }
   }
 
@@ -227,11 +232,13 @@ async function sendResponseWithMedia(sock, jid, responseParts, mediaList) {
 
   for (const media of extraMedia) {
     await sendMedia(sock, jid, media);
+    await wait(450);
   }
 
   if (responseParts.length === 0 && indexedMedia.length > 0) {
     for (const media of indexedMedia) {
       await sendMedia(sock, jid, media);
+      await wait(450);
     }
   }
 }
@@ -530,20 +537,6 @@ function renderCheckoutPlaceholder(text, checkout, state = {}) {
   });
 }
 
-function buildTotalMessage(checkout, qty, area) {
-  return renderCheckoutPlaceholder(
-    [
-      `baik kak.. untuk pengiriman ke [area]`,
-      `[produk] [qty] pcs = [subtotal]`,
-      `ongkir = [ongkir]`,
-      ``,
-      `totalnya [total]`,
-    ].join("\n"),
-    checkout,
-    { qty, area }
-  );
-}
-
 function cleanAddressText(text) {
   return String(text || "")
     .split(/\n+/)
@@ -567,25 +560,6 @@ function extractName(text) {
   }
 
   return "";
-}
-
-function buildFinalOrderMessage(checkout, state) {
-  return renderCheckoutTemplate(
-    getCheckoutTemplate(checkout, "finalOrder"),
-    checkout,
-    state,
-    [
-      `Konfirmasi pesanan ya kak:`,
-      ``,
-      `nama: [nama]`,
-      `alamat: [alamat]`,
-      `pesanan: [pesanan]`,
-      `pengiriman: [area]`,
-      `total harga: [total]`,
-      ``,
-      `kami izin melanjutkan pesanannya ya kak 🙏`,
-    ].join("\n")
-  );
 }
 
 async function updateSessionCheckout(phone, checkout) {
@@ -1020,19 +994,22 @@ async function startBot() {
             ...wordMatches,
           ]);
 
-          // Prioritas trigger yang disebut paling belakang customer.
+          // Urutan mengikuti posisi trigger di chat customer.
           // Jadi: "berapa? bisa cod?"
-          // maka trigger "cod" akan dijawab terakhir / paling prioritas.
+          // maka trigger "berapa/harga" dijawab dulu sampai semua jawabannya selesai,
+          // baru lanjut trigger "cod".
           return merged.sort((a, b) => {
-            const aIndex = incomingText.lastIndexOf(
-              normalizeText(a.keyword)
-            );
+            const aIndex = incomingText.indexOf(normalizeText(a.keyword));
+            const bIndex = incomingText.indexOf(normalizeText(b.keyword));
 
-            const bIndex = incomingText.lastIndexOf(
-              normalizeText(b.keyword)
-            );
+            const safeAIndex = aIndex === -1 ? Number.MAX_SAFE_INTEGER : aIndex;
+            const safeBIndex = bIndex === -1 ? Number.MAX_SAFE_INTEGER : bIndex;
 
-            return bIndex - aIndex;
+            if (safeAIndex !== safeBIndex) {
+              return safeAIndex - safeBIndex;
+            }
+
+            return normalizeText(b.keyword).length - normalizeText(a.keyword).length;
           });
         }
 
@@ -1056,16 +1033,14 @@ async function startBot() {
 
           if (containsMatches.length > 0) {
             const sorted = containsMatches.sort((a, b) => {
-              const aIndex = incomingText.lastIndexOf(
-                normalizeText(a.keyword)
-              );
+              const aIndex = incomingText.indexOf(normalizeText(a.keyword));
+              const bIndex = incomingText.indexOf(normalizeText(b.keyword));
 
-              const bIndex = incomingText.lastIndexOf(
-                normalizeText(b.keyword)
-              );
+              const safeAIndex = aIndex === -1 ? Number.MAX_SAFE_INTEGER : aIndex;
+              const safeBIndex = bIndex === -1 ? Number.MAX_SAFE_INTEGER : bIndex;
 
-              if (aIndex !== bIndex) {
-                return bIndex - aIndex;
+              if (safeAIndex !== safeBIndex) {
+                return safeAIndex - safeBIndex;
               }
 
               return normalizeText(b.keyword).length - normalizeText(a.keyword).length;
