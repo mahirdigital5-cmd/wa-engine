@@ -39,6 +39,11 @@ const followupStates = new Map();
 // bisa digabung jadi satu proses trigger.
 const pendingMessageBuffers = new Map();
 
+// Antrean proses per nomor.
+// Ini mencegah trigger tabrakan saat customer kirim chat baru
+// sebelum jawaban trigger sebelumnya selesai terkirim semua.
+const messageProcessQueues = new Map();
+
 const AFFIRMATIVE_WORDS = [
   "iya",
   "ya",
@@ -214,7 +219,7 @@ async function sendResponseWithMedia(sock, jid, responseParts, mediaList) {
 
     for (const media of mediaForAnswer) {
       await sendMedia(sock, jid, media);
-      await wait(450);
+      await wait(650);
     }
 
     const part = responseParts[i];
@@ -225,7 +230,7 @@ async function sendResponseWithMedia(sock, jid, responseParts, mediaList) {
       });
 
       console.log("BALASAN TEXT DIKIRIM:", part);
-      await wait(450);
+      await wait(650);
     }
   }
 
@@ -242,7 +247,7 @@ async function sendResponseWithMedia(sock, jid, responseParts, mediaList) {
   if (responseParts.length === 0 && indexedMedia.length > 0) {
     for (const media of indexedMedia) {
       await sendMedia(sock, jid, media);
-      await wait(450);
+      await wait(650);
     }
   }
 }
@@ -640,6 +645,28 @@ async function updateSessionFlow(phone, flowId) {
   }
 }
 
+function enqueueMessageProcess(phone, task) {
+  const previous = messageProcessQueues.get(phone) || Promise.resolve();
+
+  const current = previous
+    .catch((err) => {
+      console.log("QUEUE SEBELUMNYA ERROR:", err?.message);
+    })
+    .then(task)
+    .catch((err) => {
+      console.log("QUEUE PROCESS ERROR:", err?.message);
+    })
+    .finally(() => {
+      if (messageProcessQueues.get(phone) === current) {
+        messageProcessQueues.delete(phone);
+      }
+    });
+
+  messageProcessQueues.set(phone, current);
+
+  return current;
+}
+
 function clearReconnectTimer() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -765,13 +792,15 @@ async function startBot() {
           text,
         ];
 
-        const timer = setTimeout(async () => {
-          try {
-            pendingMessageBuffers.delete(phone);
+        const timer = setTimeout(() => {
+          pendingMessageBuffers.delete(phone);
 
-            const mergedText = combinedTexts.join("\n");
+          const mergedText = combinedTexts.join("\n");
 
-            console.log("MERGED TEXT:", mergedText);
+          console.log("MERGED TEXT MASUK QUEUE:", mergedText);
+
+          enqueueMessageProcess(phone, async () => {
+            console.log("QUEUE MULAI PROSES:", phone, mergedText);
 
             await processIncomingMessage(
               sock,
@@ -779,9 +808,9 @@ async function startBot() {
               mergedText,
               phone
             );
-          } catch (err) {
-            console.log("BUFFER PROCESS ERROR:", err?.message);
-          }
+
+            console.log("QUEUE SELESAI PROSES:", phone);
+          });
         }, 1800);
 
         pendingMessageBuffers.set(phone, {
@@ -1221,7 +1250,7 @@ async function startBot() {
 
           // Tunggu sebentar setelah satu trigger selesai total,
           // baru lanjut trigger berikutnya.
-          await new Promise((resolve) => setTimeout(resolve, 900));
+          await new Promise((resolve) => setTimeout(resolve, 1200));
         }
       } catch (err) {
         console.log("ERROR MESSAGE:", err?.message);
