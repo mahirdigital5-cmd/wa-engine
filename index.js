@@ -353,6 +353,9 @@ async function startBot() {
         }
 
         if (foundList.length === 0 && session?.flow_id) {
+          // Kalau user sudah berada di sebuah alur,
+          // trigger hanya boleh dicari di alur aktif tersebut.
+          // Ini mencegah trigger dari alur lain ikut terkirim.
           const triggersInActiveFlow = triggers.filter(
             (t) => t.flow_id === session.flow_id && t.is_flow_entry !== true
           );
@@ -364,14 +367,28 @@ async function startBot() {
           }
         }
 
-        if (foundList.length === 0) {
-          const globalTriggers = triggers.filter((t) => t.is_flow_entry !== true);
+        if (foundList.length === 0 && !session?.flow_id) {
+          const globalTriggers = triggers.filter((t) => {
+            if (t.is_flow_entry === true) return false;
+
+            return (
+              t.flow_id === null ||
+              t.flow_id === undefined ||
+              t.flow_id === ""
+            );
+          });
 
           foundList = matchTriggers(globalTriggers);
 
           if (foundList.length > 0) {
-            console.log("TRIGGER GLOBAL:", foundList);
+            console.log("TRIGGER GLOBAL TANPA FLOW:", foundList);
           }
+        }
+
+        if (foundList.length === 0 && session?.flow_id) {
+          console.log(
+            "TIDAK ADA TRIGGER COCOK DI FLOW AKTIF. TIDAK MENCARI KE FLOW LAIN."
+          );
         }
 
         if (foundList.length === 0) {
