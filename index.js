@@ -370,6 +370,7 @@ function getFlowCheckout(flows, flowId) {
     priceExtra: Number(checkout.priceExtra) || 0,
     defaultShipping: Number(checkout.defaultShipping) || 0,
     shippingByArea: checkout.shippingByArea || {},
+    templates: checkout.templates || {},
   };
 }
 
@@ -501,20 +502,51 @@ function getCheckoutTotal(checkout, qty, area) {
   };
 }
 
-function buildTotalMessage(checkout, qty, area) {
+function getCheckoutVariables(checkout, state = {}) {
+  const qty = Number(state.qty) || 1;
+  const area = state.area || "";
   const totals = getCheckoutTotal(checkout, qty, area);
-  const areaText = area ? ` ke ${area}` : "";
+  const pesanan = `${checkout.productName} ${qty} pcs`;
 
-  return [
-    `baik kak.. untuk pengiriman${areaText}`,
-    `${checkout.productName} ${qty} pcs = ${formatRupiah(totals.productTotal)}`,
-    `ongkir = ${formatRupiah(totals.shipping)}`,
-    ``,
-    `totalnya ${formatRupiah(totals.total)}`,
-    `sudah termasuk ongkir dll dari kita`,
-    ``,
-    `kalau sudah sesuai, balas oke kak ya 🙏`,
-  ].join("\n");
+  return {
+    area: area || "sesuai alamat",
+    qty,
+    produk: checkout.productName,
+    subtotal: formatRupiah(totals.productTotal),
+    ongkir: formatRupiah(totals.shipping),
+    total: formatRupiah(totals.total),
+    nama: state.name || "-",
+    alamat: state.address || "-",
+    pesanan,
+  };
+}
+
+function renderCheckoutTemplate(template, checkout, state = {}, fallback = "") {
+  const source = String(template || "").trim() || fallback;
+  const variables = getCheckoutVariables(checkout, state);
+
+  return source.replace(/\[([a-zA-Z_]+)\]/g, (match, key) => {
+    return variables[key] !== undefined ? String(variables[key]) : match;
+  });
+}
+
+function getCheckoutTemplate(checkout, key, fallback = "") {
+  return String(checkout?.templates?.[key] || "").trim() || fallback;
+}
+
+function buildTotalMessage(checkout, qty, area) {
+  return renderCheckoutTemplate(
+    getCheckoutTemplate(checkout, "total"),
+    checkout,
+    { qty, area },
+    [
+      `baik kak.. untuk pengiriman ke [area]`,
+      `[produk] [qty] pcs = [subtotal]`,
+      `ongkir = [ongkir]`,
+      ``,
+      `totalnya [total]`,
+    ].join("\n")
+  );
 }
 
 function cleanAddressText(text) {
@@ -543,21 +575,22 @@ function extractName(text) {
 }
 
 function buildFinalOrderMessage(checkout, state) {
-  const qty = Number(state.qty) || 1;
-  const area = state.area || "";
-  const totals = getCheckoutTotal(checkout, qty, area);
-
-  return [
-    `Konfirmasi pesanan ya kak:`,
-    ``,
-    `nama: ${state.name || "-"}`,
-    `alamat: ${state.address || "-"}`,
-    `pesanan: ${checkout.productName} ${qty} pcs`,
-    `pengiriman: ${area || "sesuai alamat"}`,
-    `total harga: ${formatRupiah(totals.total)}`,
-    ``,
-    `kami izin melanjutkan pesanannya ya kak 🙏`,
-  ].join("\n");
+  return renderCheckoutTemplate(
+    getCheckoutTemplate(checkout, "finalOrder"),
+    checkout,
+    state,
+    [
+      `Konfirmasi pesanan ya kak:`,
+      ``,
+      `nama: [nama]`,
+      `alamat: [alamat]`,
+      `pesanan: [pesanan]`,
+      `pengiriman: [area]`,
+      `total harga: [total]`,
+      ``,
+      `kami izin melanjutkan pesanannya ya kak 🙏`,
+    ].join("\n")
+  );
 }
 
 async function updateSessionCheckout(phone, checkout) {
@@ -590,7 +623,9 @@ async function handleCheckoutMessage(sock, jid, text, session, flows) {
     const qty = extractQty(text);
 
     if (!qty) {
-      await sock.sendMessage(jid, { text: "mau pesan berapa pcs ya kak?" });
+      await sock.sendMessage(jid, {
+        text: getCheckoutTemplate(checkout, "askQty", "mau pesan berapa pcs ya kak?"),
+      });
       return true;
     }
 
@@ -610,7 +645,9 @@ async function handleCheckoutMessage(sock, jid, text, session, flows) {
   if (checkoutState?.step === "awaiting_total_confirm") {
     if (isNegative(text)) {
       await updateSessionCheckout(jid, {});
-      await sock.sendMessage(jid, { text: "baik kak, tidak apa-apa 🙏" });
+      await sock.sendMessage(jid, {
+        text: getCheckoutTemplate(checkout, "cancel", "baik kak, tidak apa-apa 🙏"),
+      });
       return true;
     }
 
@@ -625,7 +662,9 @@ async function handleCheckoutMessage(sock, jid, text, session, flows) {
         step: "awaiting_name",
       });
 
-      await sock.sendMessage(jid, { text: "nama penerimanya siapa ya kak?" });
+      await sock.sendMessage(jid, {
+        text: getCheckoutTemplate(checkout, "askName", "nama penerimanya siapa ya kak?"),
+      });
       return true;
     }
 
@@ -658,7 +697,7 @@ async function handleCheckoutMessage(sock, jid, text, session, flows) {
     if (isNegative(text)) {
       await updateSessionCheckout(jid, {});
       await sock.sendMessage(jid, {
-        text: "baik kak, pesanannya belum kami lanjutkan ya 🙏",
+        text: getCheckoutTemplate(checkout, "cancel", "baik kak, pesanannya belum kami lanjutkan ya 🙏"),
       });
       return true;
     }
@@ -666,7 +705,7 @@ async function handleCheckoutMessage(sock, jid, text, session, flows) {
     if (isAffirmative(text)) {
       await updateSessionCheckout(jid, {});
       await sock.sendMessage(jid, {
-        text: "siap kak, terima kasih. Pesanannya segera kami proses 🙏",
+        text: getCheckoutTemplate(checkout, "done", "siap kak, terima kasih. Pesanannya segera kami proses 🙏"),
       });
       return true;
     }
@@ -692,7 +731,9 @@ async function handleCheckoutMessage(sock, jid, text, session, flows) {
     await updateSessionCheckout(jid, baseState);
 
     if (!qty) {
-      await sock.sendMessage(jid, { text: "baik kak, mau pesan berapa pcs?" });
+      await sock.sendMessage(jid, {
+        text: getCheckoutTemplate(checkout, "askQty", "baik kak, mau pesan berapa pcs?"),
+      });
       return true;
     }
 
@@ -889,6 +930,21 @@ async function startBot() {
 
         const incomingText = normalizeText(text);
 
+        function splitIncomingSegments(value) {
+          return String(value || "")
+            .split(/[?!.\n,]+|\bdan\b|\bterus\b|\bsama\b/gi)
+            .map((item) => normalizeText(item))
+            .filter(Boolean);
+        }
+
+        const incomingSegments = splitIncomingSegments(text);
+
+        function segmentMatchesKeyword(segment, keyword) {
+          const normalizedKeyword = normalizeText(keyword);
+          if (!segment || !normalizedKeyword) return false;
+          return segment.includes(normalizedKeyword);
+        }
+
         function matchTriggers(list) {
           const activeList = list.filter((t) => t.active);
 
@@ -929,10 +985,11 @@ async function startBot() {
 
           const incomingWords = getImportantWords(incomingText);
 
-          const priceMatches = activeList.filter((t) => {
-            const keyword = normalizeText(t.keyword);
-            return isPriceTrigger(keyword) && isPriceQuestion(incomingText);
-          });
+          const priceMatches = isPriceQuestion(incomingText)
+            ? activeList
+                .filter((t) => isPriceTrigger(normalizeText(t.keyword)))
+                .slice(0, 1)
+            : [];
 
           const exactMatches = activeList.filter((t) => {
             if (t.type !== "Sama Persis") return false;
