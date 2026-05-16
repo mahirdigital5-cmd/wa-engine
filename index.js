@@ -332,13 +332,47 @@ async function startBot() {
           ]);
         }
 
+        function matchFlowEntryTriggers(list) {
+          const activeList = list.filter((t) => t.active);
+
+          const exactMatches = activeList.filter((t) => {
+            return incomingText === normalizeText(t.keyword);
+          });
+
+          if (exactMatches.length > 0) {
+            return uniqueTriggers(exactMatches).slice(0, 1);
+          }
+
+          const containsMatches = activeList.filter((t) => {
+            const keyword = normalizeText(t.keyword);
+            if (!keyword) return false;
+
+            return incomingText.includes(keyword);
+          });
+
+          if (containsMatches.length > 0) {
+            const sorted = containsMatches.sort((a, b) => {
+              return normalizeText(b.keyword).length - normalizeText(a.keyword).length;
+            });
+
+            return uniqueTriggers(sorted).slice(0, 1);
+          }
+
+          return [];
+        }
+
+        function getFlowIdValue(value) {
+          if (value === null || value === undefined || value === "") return null;
+          return String(value);
+        }
+
         let foundList = [];
 
         const flowEntryTriggers = triggers.filter(
           (t) => t.is_flow_entry === true
         );
 
-        const flowEntryFoundList = matchTriggers(flowEntryTriggers);
+        const flowEntryFoundList = matchFlowEntryTriggers(flowEntryTriggers);
 
         if (flowEntryFoundList.length > 0) {
           foundList = flowEntryFoundList;
@@ -356,9 +390,14 @@ async function startBot() {
           // Kalau user sudah berada di sebuah alur,
           // trigger hanya boleh dicari di alur aktif tersebut.
           // Ini mencegah trigger dari alur lain ikut terkirim.
-          const triggersInActiveFlow = triggers.filter(
-            (t) => t.flow_id === session.flow_id && t.is_flow_entry !== true
-          );
+          const activeFlowId = getFlowIdValue(session.flow_id);
+
+          const triggersInActiveFlow = triggers.filter((t) => {
+            return (
+              getFlowIdValue(t.flow_id) === activeFlowId &&
+              t.is_flow_entry !== true
+            );
+          });
 
           foundList = matchTriggers(triggersInActiveFlow);
 
@@ -370,12 +409,7 @@ async function startBot() {
         if (foundList.length === 0 && !session?.flow_id) {
           const globalTriggers = triggers.filter((t) => {
             if (t.is_flow_entry === true) return false;
-
-            return (
-              t.flow_id === null ||
-              t.flow_id === undefined ||
-              t.flow_id === ""
-            );
+            return getFlowIdValue(t.flow_id) === null;
           });
 
           foundList = matchTriggers(globalTriggers);
@@ -391,8 +425,33 @@ async function startBot() {
           );
         }
 
+        if (foundList.length > 0 && session?.flow_id) {
+          const activeFlowId = getFlowIdValue(session.flow_id);
+
+          foundList = foundList.filter((t) => {
+            if (t.is_flow_entry === true) return true;
+            return getFlowIdValue(t.flow_id) === activeFlowId;
+          });
+        }
+
         if (foundList.length === 0) {
           console.log("TRIGGER TIDAK DITEMUKAN:", text);
+          return;
+        }
+
+        foundList = uniqueTriggers(foundList);
+
+        if (session?.flow_id) {
+          const activeFlowId = getFlowIdValue(session.flow_id);
+
+          foundList = foundList.filter((found) => {
+            if (found.is_flow_entry === true) return true;
+            return getFlowIdValue(found.flow_id) === activeFlowId;
+          });
+        }
+
+        if (foundList.length === 0) {
+          console.log("TRIGGER FINAL KOSONG SETELAH FILTER FLOW:", text);
           return;
         }
 
