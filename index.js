@@ -35,6 +35,32 @@ let reconnectTimer = null;
 const followupTimers = new Map();
 const followupStates = new Map();
 
+const AFFIRMATIVE_WORDS = [
+  "iya",
+  "ya",
+  "y",
+  "ok",
+  "oke",
+  "sip",
+  "siap",
+  "lanjut",
+  "boleh",
+  "gas",
+  "silahkan",
+  "setuju",
+];
+
+const NEGATIVE_WORDS = [
+  "tidak",
+  "nggak",
+  "gak",
+  "ga",
+  "batal",
+  "gajadi",
+  "engga",
+  "enggak",
+];
+
 const TRIGGER_API = "https://chat-bot-nexis.vercel.app/api/triggers";
 
 function normalizeText(value) {
@@ -307,6 +333,376 @@ function scheduleFollowups(sock, jid, found) {
   });
 }
 
+function parseJsonMaybe(value, fallback = {}) {
+  if (!value) return fallback;
+
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return fallback;
+    }
+  }
+
+  return value || fallback;
+}
+
+function formatRupiah(value) {
+  const number = Number(value) || 0;
+  if (number >= 1000 && number % 1000 === 0) {
+    return `${number / 1000}rb`;
+  }
+
+  return `Rp ${number.toLocaleString("id-ID")}`;
+}
+
+function getFlowCheckout(flows, flowId) {
+  const flow = (flows || []).find((item) => String(item.id) === String(flowId));
+  const checkout = parseJsonMaybe(flow?.checkout, {});
+
+  if (checkout?.enabled !== true) return null;
+
+  return {
+    enabled: true,
+    productName: checkout.productName || flow?.name || "Produk",
+    price1: Number(checkout.price1) || 0,
+    price2: Number(checkout.price2) || 0,
+    priceExtra: Number(checkout.priceExtra) || 0,
+    defaultShipping: Number(checkout.defaultShipping) || 0,
+    shippingByArea: checkout.shippingByArea || {},
+  };
+}
+
+function isAffirmative(text) {
+  const words = normalizeText(text).split(" ");
+  return AFFIRMATIVE_WORDS.some((word) => words.includes(word));
+}
+
+function isNegative(text) {
+  const normalized = normalizeText(text);
+  return NEGATIVE_WORDS.some((word) => normalized.includes(word));
+}
+
+function looksLikeAddress(text) {
+  const normalized = normalizeText(text);
+
+  const addressWords = [
+    "jl",
+    "jalan",
+    "rt",
+    "rw",
+    "blok",
+    "no",
+    "nomor",
+    "desa",
+    "dusun",
+    "kelurahan",
+    "kecamatan",
+    "kabupaten",
+    "kota",
+    "provinsi",
+    "patokan",
+    "rumah",
+    "gang",
+    "gg",
+  ];
+
+  return addressWords.some((word) => normalized.includes(word));
+}
+
+function extractQty(text) {
+  const normalized = normalizeText(text);
+  const digitMatch = normalized.match(/\b(\d{1,2})\b/);
+
+  if (digitMatch) return Number(digitMatch[1]);
+
+  const wordMap = {
+    satu: 1,
+    dua: 2,
+    tiga: 3,
+    empat: 4,
+    lima: 5,
+    enam: 6,
+    tujuh: 7,
+    delapan: 8,
+    sembilan: 9,
+    sepuluh: 10,
+  };
+
+  for (const [word, number] of Object.entries(wordMap)) {
+    if (normalized.includes(word)) return number;
+  }
+
+  return null;
+}
+
+function calculateProductPrice(checkout, qty) {
+  const quantity = Number(qty) || 1;
+
+  if (quantity <= 1) return checkout.price1;
+  if (quantity === 2) return checkout.price2 || checkout.price1 * 2;
+
+  const baseTwo = checkout.price2 || checkout.price1 * 2;
+  const extra = checkout.priceExtra || checkout.price1;
+
+  return baseTwo + (quantity - 2) * extra;
+}
+
+function extractArea(text, checkout) {
+  const normalized = normalizeText(text);
+  const shippingByArea = checkout?.shippingByArea || {};
+
+  for (const area of Object.keys(shippingByArea)) {
+    if (normalized.includes(normalizeText(area))) return area;
+  }
+
+  const areaPatterns = [
+    /kecamatan\s+([a-zA-Z\s]+)/i,
+    /kec\s+([a-zA-Z\s]+)/i,
+    /kota\s+([a-zA-Z\s]+)/i,
+    /kabupaten\s+([a-zA-Z\s]+)/i,
+    /kab\s+([a-zA-Z\s]+)/i,
+  ];
+
+  for (const pattern of areaPatterns) {
+    const match = String(text || "").match(pattern);
+    if (match?.[1]) {
+      return normalizeText(match[1]).split(" ").slice(0, 2).join(" ");
+    }
+  }
+
+  return "";
+}
+
+function getShippingPrice(checkout, area) {
+  const shippingByArea = checkout?.shippingByArea || {};
+  const normalizedArea = normalizeText(area);
+
+  for (const [key, value] of Object.entries(shippingByArea)) {
+    if (
+      normalizeText(key) === normalizedArea ||
+      normalizedArea.includes(normalizeText(key))
+    ) {
+      return Number(value) || checkout.defaultShipping || 0;
+    }
+  }
+
+  return checkout.defaultShipping || 0;
+}
+
+function getCheckoutTotal(checkout, qty, area) {
+  const productTotal = calculateProductPrice(checkout, qty);
+  const shipping = getShippingPrice(checkout, area);
+
+  return {
+    productTotal,
+    shipping,
+    total: productTotal + shipping,
+  };
+}
+
+function buildTotalMessage(checkout, qty, area) {
+  const totals = getCheckoutTotal(checkout, qty, area);
+  const areaText = area ? ` ke ${area}` : "";
+
+  return [
+    `baik kak.. untuk pengiriman${areaText}`,
+    `${checkout.productName} ${qty} pcs = ${formatRupiah(totals.productTotal)}`,
+    `ongkir = ${formatRupiah(totals.shipping)}`,
+    ``,
+    `totalnya ${formatRupiah(totals.total)}`,
+    `sudah termasuk ongkir dll dari kita`,
+    ``,
+    `kalau sudah sesuai, balas oke kak ya 🙏`,
+  ].join("\n");
+}
+
+function cleanAddressText(text) {
+  return String(text || "")
+    .split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .join(", ");
+}
+
+function extractName(text) {
+  const raw = String(text || "");
+  const namePatterns = [
+    /nama\s*[:\-]?\s*([a-zA-Z\s]+)/i,
+    /atas nama\s*[:\-]?\s*([a-zA-Z\s]+)/i,
+  ];
+
+  for (const pattern of namePatterns) {
+    const match = raw.match(pattern);
+    if (match?.[1]) {
+      return match[1].trim().split(/\s+/).slice(0, 4).join(" ");
+    }
+  }
+
+  return "";
+}
+
+function buildFinalOrderMessage(checkout, state) {
+  const qty = Number(state.qty) || 1;
+  const area = state.area || "";
+  const totals = getCheckoutTotal(checkout, qty, area);
+
+  return [
+    `Konfirmasi pesanan ya kak:`,
+    ``,
+    `nama: ${state.name || "-"}`,
+    `alamat: ${state.address || "-"}`,
+    `pesanan: ${checkout.productName} ${qty} pcs`,
+    `pengiriman: ${area || "sesuai alamat"}`,
+    `total harga: ${formatRupiah(totals.total)}`,
+    ``,
+    `kami izin melanjutkan pesanannya ya kak 🙏`,
+  ].join("\n");
+}
+
+async function updateSessionCheckout(phone, checkout) {
+  try {
+    await safeJsonFetch(`${TRIGGER_API}?t=${Date.now()}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        phone,
+        checkout,
+      }),
+    });
+  } catch (err) {
+    console.log("GAGAL UPDATE CHECKOUT:", err?.message);
+  }
+}
+
+async function handleCheckoutMessage(sock, jid, text, session, flows) {
+  const checkoutState = parseJsonMaybe(session?.checkout, {});
+  const activeFlowId = session?.flow_id;
+
+  if (!activeFlowId) return false;
+
+  const checkout = getFlowCheckout(flows, activeFlowId);
+  if (!checkout) return false;
+
+  if (checkoutState?.step === "awaiting_qty") {
+    const qty = extractQty(text);
+
+    if (!qty) {
+      await sock.sendMessage(jid, { text: "mau pesan berapa pcs ya kak?" });
+      return true;
+    }
+
+    const area = checkoutState.area || extractArea(checkoutState.address || "", checkout);
+    const nextState = {
+      ...checkoutState,
+      step: "awaiting_total_confirm",
+      qty,
+      area,
+    };
+
+    await updateSessionCheckout(jid, nextState);
+    await sock.sendMessage(jid, { text: buildTotalMessage(checkout, qty, area) });
+    return true;
+  }
+
+  if (checkoutState?.step === "awaiting_total_confirm") {
+    if (isNegative(text)) {
+      await updateSessionCheckout(jid, {});
+      await sock.sendMessage(jid, { text: "baik kak, tidak apa-apa 🙏" });
+      return true;
+    }
+
+    if (!isAffirmative(text)) return false;
+
+    const address = cleanAddressText(checkoutState.address || "");
+    const name = checkoutState.name || extractName(address);
+
+    if (!name) {
+      await updateSessionCheckout(jid, {
+        ...checkoutState,
+        step: "awaiting_name",
+      });
+
+      await sock.sendMessage(jid, { text: "nama penerimanya siapa ya kak?" });
+      return true;
+    }
+
+    const finalState = {
+      ...checkoutState,
+      step: "awaiting_final_confirm",
+      address,
+      name,
+    };
+
+    await updateSessionCheckout(jid, finalState);
+    await sock.sendMessage(jid, { text: buildFinalOrderMessage(checkout, finalState) });
+    return true;
+  }
+
+  if (checkoutState?.step === "awaiting_name") {
+    const finalState = {
+      ...checkoutState,
+      step: "awaiting_final_confirm",
+      name: String(text || "").trim(),
+      address: cleanAddressText(checkoutState.address || ""),
+    };
+
+    await updateSessionCheckout(jid, finalState);
+    await sock.sendMessage(jid, { text: buildFinalOrderMessage(checkout, finalState) });
+    return true;
+  }
+
+  if (checkoutState?.step === "awaiting_final_confirm") {
+    if (isNegative(text)) {
+      await updateSessionCheckout(jid, {});
+      await sock.sendMessage(jid, {
+        text: "baik kak, pesanannya belum kami lanjutkan ya 🙏",
+      });
+      return true;
+    }
+
+    if (isAffirmative(text)) {
+      await updateSessionCheckout(jid, {});
+      await sock.sendMessage(jid, {
+        text: "siap kak, terima kasih. Pesanannya segera kami proses 🙏",
+      });
+      return true;
+    }
+
+    return false;
+  }
+
+  if (looksLikeAddress(text)) {
+    const qty = extractQty(text);
+    const area = extractArea(text, checkout);
+    const address = cleanAddressText(text);
+    const name = extractName(text);
+
+    const baseState = {
+      step: qty ? "awaiting_total_confirm" : "awaiting_qty",
+      qty: qty || null,
+      area,
+      address,
+      name,
+      startedAt: new Date().toISOString(),
+    };
+
+    await updateSessionCheckout(jid, baseState);
+
+    if (!qty) {
+      await sock.sendMessage(jid, { text: "baik kak, mau pesan berapa pcs?" });
+      return true;
+    }
+
+    await sock.sendMessage(jid, { text: buildTotalMessage(checkout, qty, area) });
+    return true;
+  }
+
+  return false;
+}
+
 async function safeJsonFetch(url, options = {}) {
   const res = await fetch(url, options);
   const text = await res.text();
@@ -473,7 +869,20 @@ async function startBot() {
         );
 
         const triggers = Array.isArray(data.triggers) ? data.triggers : [];
+        const flows = Array.isArray(data.flows) ? data.flows : [];
         const session = data.session || null;
+
+        const checkoutHandled = await handleCheckoutMessage(
+          sock,
+          phone,
+          text,
+          session,
+          flows
+        );
+
+        if (checkoutHandled) {
+          return;
+        }
 
         console.log("JUMLAH TRIGGER:", triggers.length);
         console.log("SESSION AKTIF:", session);
@@ -725,7 +1134,30 @@ async function startBot() {
             );
           }
 
-          scheduleFollowups(sock, msg.key.remoteJid, found);
+          const triggerCheckout = getFlowCheckout(flows, found.flow_id);
+
+          if (triggerCheckout && looksLikeAddress(text)) {
+            const qty = extractQty(text) || 1;
+            const area = extractArea(text, triggerCheckout);
+            const address = cleanAddressText(text);
+            const name = extractName(text);
+
+            const checkoutState = {
+              step: "awaiting_total_confirm",
+              qty,
+              area,
+              address,
+              name,
+              startedAt: new Date().toISOString(),
+            };
+
+            await updateSessionCheckout(msg.key.remoteJid, checkoutState);
+            await sock.sendMessage(msg.key.remoteJid, {
+              text: buildTotalMessage(triggerCheckout, qty, area),
+            });
+          } else {
+            scheduleFollowups(sock, msg.key.remoteJid, found);
+          }
 
           await new Promise((resolve) => setTimeout(resolve, 700));
         }
