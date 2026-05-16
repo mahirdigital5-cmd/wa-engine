@@ -1030,12 +1030,27 @@ async function startBot() {
             return matchedWords.length >= 2;
           });
 
-          return uniqueTriggers([
+          const merged = uniqueTriggers([
             ...priceMatches,
             ...exactMatches,
             ...containsMatches,
             ...wordMatches,
           ]);
+
+          // Prioritas trigger yang disebut paling belakang customer.
+          // Jadi: "berapa? bisa cod?"
+          // maka trigger "cod" akan dijawab terakhir / paling prioritas.
+          return merged.sort((a, b) => {
+            const aIndex = incomingText.lastIndexOf(
+              normalizeText(a.keyword)
+            );
+
+            const bIndex = incomingText.lastIndexOf(
+              normalizeText(b.keyword)
+            );
+
+            return bIndex - aIndex;
+          });
         }
 
         function matchFlowEntryTriggers(list) {
@@ -1058,6 +1073,18 @@ async function startBot() {
 
           if (containsMatches.length > 0) {
             const sorted = containsMatches.sort((a, b) => {
+              const aIndex = incomingText.lastIndexOf(
+                normalizeText(a.keyword)
+              );
+
+              const bIndex = incomingText.lastIndexOf(
+                normalizeText(b.keyword)
+              );
+
+              if (aIndex !== bIndex) {
+                return bIndex - aIndex;
+              }
+
               return normalizeText(b.keyword).length - normalizeText(a.keyword).length;
             });
 
