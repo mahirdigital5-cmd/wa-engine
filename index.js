@@ -634,10 +634,73 @@ function looksLikeAddress(text) {
 }
 
 function extractQty(text) {
-  const normalized = normalizeText(text);
-  const digitMatch = normalized.match(/\b(\d{1,2})\b/);
+  const raw = String(text || "");
+  const normalized = normalizeText(raw);
 
-  if (digitMatch) return Number(digitMatch[1]);
+  const quantityWords = [
+    "pcs",
+    "pc",
+    "biji",
+    "buah",
+    "unit",
+    "qty",
+    "jumlah",
+    "pesan",
+    "order",
+    "ambil",
+    "beli",
+    "mau",
+    "paket",
+  ];
+
+  const addressWords = [
+    "jl",
+    "jalan",
+    "no",
+    "nomor",
+    "rt",
+    "rw",
+    "blok",
+    "gang",
+    "gg",
+    "kelurahan",
+    "kecamatan",
+    "kabupaten",
+    "kota",
+    "provinsi",
+    "patokan",
+    "rumah",
+  ];
+
+  const hasQuantityIntent = quantityWords.some((word) =>
+    normalized.includes(word)
+  );
+
+  const hasAddressIntent = addressWords.some((word) =>
+    normalized.split(" ").includes(word)
+  );
+
+  // Kalau chat terlihat seperti alamat dan tidak ada kata yang jelas menunjukkan jumlah,
+  // jangan ambil angka dari alamat seperti No. 54 / RT 29 / RW 05 sebagai qty.
+  if (hasAddressIntent && !hasQuantityIntent) {
+    return null;
+  }
+
+  // Ambil angka hanya kalau dekat dengan kata qty.
+  // Contoh: "2 pcs", "pcs 2", "ambil 3", "mau 2".
+  const quantityPatterns = [
+    /\b(\d{1,2})\s*(pcs|pc|biji|buah|unit|paket)\b/i,
+    /\b(qty|jumlah|pesan|order|ambil|beli|mau)\s*(\d{1,2})\b/i,
+    /\b(\d{1,2})\s*(qty|jumlah)\b/i,
+  ];
+
+  for (const pattern of quantityPatterns) {
+    const match = raw.match(pattern);
+    if (match) {
+      const value = Number(match[1] || match[2]);
+      if (value > 0 && value <= 99) return value;
+    }
+  }
 
   const wordMap = {
     satu: 1,
@@ -652,8 +715,11 @@ function extractQty(text) {
     sepuluh: 10,
   };
 
-  for (const [word, number] of Object.entries(wordMap)) {
-    if (normalized.includes(word)) return number;
+  // Angka berbentuk kata hanya dipakai jika ada niat jumlah.
+  if (hasQuantityIntent) {
+    for (const [word, number] of Object.entries(wordMap)) {
+      if (normalized.split(" ").includes(word)) return number;
+    }
   }
 
   return null;
