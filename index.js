@@ -248,6 +248,60 @@ function keywordHasAreaPlaceholder(keyword = "") {
   return String(keyword || "").toLowerCase().includes("[area]");
 }
 
+function keywordHasQtyPlaceholder(keyword = "") {
+  const raw = String(keyword || "").toLowerCase();
+
+  return (
+    raw.includes("[qty]") ||
+    raw.includes("[jumlah]") ||
+    raw.includes("[pcs]")
+  );
+}
+
+function isQtyQuestion(text = "") {
+  const normalized = normalizeText(text);
+
+  const qtyWords = [
+    "pcs",
+    "pc",
+    "biji",
+    "buah",
+    "unit",
+    "qty",
+    "jumlah",
+    "pesan",
+    "pesen",
+    "order",
+    "ambil",
+    "beli",
+    "mau",
+    "paket",
+  ];
+
+  const hasQtyWord = qtyWords.some((word) => normalized.includes(word));
+  const hasNumber = /\b\d{1,2}\b/.test(normalized);
+  const hasWordNumber = [
+    "satu",
+    "dua",
+    "tiga",
+    "empat",
+    "lima",
+    "enam",
+    "tujuh",
+    "delapan",
+    "sembilan",
+    "sepuluh",
+  ].some((word) => normalized.split(" ").includes(word));
+
+  return hasQtyWord && (hasNumber || hasWordNumber);
+}
+
+function matchQtyPlaceholderKeyword(text = "", keyword = "") {
+  if (!keywordHasQtyPlaceholder(keyword)) return false;
+
+  return extractQty(text) !== null || isQtyQuestion(text);
+}
+
 function getAllCheckoutAreas(flows = []) {
   const areas = [];
 
@@ -646,6 +700,7 @@ function extractQty(text) {
     "qty",
     "jumlah",
     "pesan",
+    "pesen",
     "order",
     "ambil",
     "beli",
@@ -690,8 +745,9 @@ function extractQty(text) {
   // Contoh: "2 pcs", "pcs 2", "ambil 3", "mau 2".
   const quantityPatterns = [
     /\b(\d{1,2})\s*(pcs|pc|biji|buah|unit|paket)\b/i,
-    /\b(qty|jumlah|pesan|order|ambil|beli|mau)\s*(\d{1,2})\b/i,
+    /\b(qty|jumlah|pesan|pesen|order|ambil|beli|mau)\s*(\d{1,2})\b/i,
     /\b(\d{1,2})\s*(qty|jumlah)\b/i,
+    /\b(\d{1,2})\s*(brp|berapa)\b/i,
   ];
 
   for (const pattern of quantityPatterns) {
@@ -881,6 +937,34 @@ async function updateSessionCheckout(phone, checkout) {
   } catch (err) {
     console.log("GAGAL UPDATE CHECKOUT:", err?.message);
   }
+}
+
+function getSessionCheckoutState(session) {
+  return parseJsonMaybe(session?.checkout, {});
+}
+
+function mergeCheckoutState(session, nextState = {}) {
+  const current = getSessionCheckoutState(session);
+
+  const merged = {
+    ...current,
+    ...nextState,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (!merged.qty || Number(merged.qty) <= 0) {
+    merged.qty = 1;
+  }
+
+  return merged;
+}
+
+async function saveCheckoutState(phone, session, nextState = {}) {
+  const merged = mergeCheckoutState(session, nextState);
+
+  await updateSessionCheckout(phone, merged);
+
+  return merged;
 }
 
 async function handleCheckoutMessage(sock, jid, text, session, flows) {
@@ -1157,6 +1241,10 @@ async function startBot() {
             return matchAreaPlaceholderKeyword(segment, keyword, flows);
           }
 
+          if (keywordHasQtyPlaceholder(keyword)) {
+            return matchQtyPlaceholderKeyword(segment, keyword);
+          }
+
           return segment.includes(normalizedKeyword);
         }
 
@@ -1238,6 +1326,12 @@ async function startBot() {
 
             if (keywordHasAreaPlaceholder(trigger.keyword)) {
               return matchAreaPlaceholderKeyword(normalizedSegment, trigger.keyword, flows)
+                ? 95
+                : 0;
+            }
+
+            if (keywordHasQtyPlaceholder(trigger.keyword)) {
+              return matchQtyPlaceholderKeyword(normalizedSegment, trigger.keyword)
                 ? 95
                 : 0;
             }
@@ -1351,6 +1445,7 @@ async function startBot() {
 
               // Ambang aman: kalau tidak cukup yakin, jangan kirim apa-apa.
               if (keywordHasAreaPlaceholder(item.trigger.keyword)) return item.score >= 80;
+              if (keywordHasQtyPlaceholder(item.trigger.keyword)) return item.score >= 80;
 
               if (item.trigger.type === "Sama Persis") return item.score >= 100;
 
@@ -1403,6 +1498,10 @@ async function startBot() {
 
             if (keywordHasAreaPlaceholder(t.keyword)) {
               return matchAreaPlaceholderKeyword(incomingText, t.keyword, flows);
+            }
+
+            if (keywordHasQtyPlaceholder(t.keyword)) {
+              return matchQtyPlaceholderKeyword(incomingText, t.keyword);
             }
 
             return incomingText.includes(keyword);
@@ -1552,6 +1651,14 @@ async function startBot() {
             }
           }
 
+          if (keywordHasQtyPlaceholder(trigger.keyword)) {
+            for (let i = 0; i < incomingSegments.length; i++) {
+              if (matchQtyPlaceholderKeyword(incomingSegments[i], trigger.keyword)) {
+                return i;
+              }
+            }
+          }
+
           const directIndex = incomingText.indexOf(keyword);
           if (directIndex !== -1) return directIndex;
 
@@ -1600,12 +1707,24 @@ async function startBot() {
         for (const found of foundList) {
           const mediaList = getMediaList(found);
           const triggerCheckout = getFlowCheckout(flows, found.flow_id);
+          const previousCheckoutState = getSessionCheckoutState(session);
+
+          const incomingQty = extractQty(text);
+          const incomingArea = triggerCheckout ? extractArea(text, triggerCheckout) : "";
+          const incomingName = extractName(text);
+          const incomingAddress = cleanAddressText(text);
+
           const checkoutStateForTrigger = {
-            qty: extractQty(text) || 1,
-            area: triggerCheckout ? extractArea(text, triggerCheckout) : "",
-            address: cleanAddressText(text),
-            name: extractName(text),
+            ...previousCheckoutState,
+            qty: incomingQty || Number(previousCheckoutState.qty) || 1,
+            area: incomingArea || previousCheckoutState.area || "",
+            address: incomingAddress || previousCheckoutState.address || "",
+            name: incomingName || previousCheckoutState.name || "",
           };
+
+          if (triggerCheckout) {
+            await saveCheckoutState(phone, session, checkoutStateForTrigger);
+          }
 
           const responseParts = getResponseParts(found.response).map((part) =>
             renderCheckoutPlaceholder(part, triggerCheckout, checkoutStateForTrigger)
