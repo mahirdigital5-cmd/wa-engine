@@ -78,6 +78,13 @@ const NEGATIVE_WORDS = [
 const TRIGGER_API = "https://chat-bot-nexis.vercel.app/api/triggers";
 const ANSWER_SEPARATOR = "\n---JAWABAN_BARU---\n";
 
+// Folder session WA.
+// Kalau di Railway/VPS, sebaiknya set env SESSION_DIR ke folder persistent,
+// contoh: /data/session
+// Dengan begitu saat deploy/update, WhatsApp tidak perlu scan ulang selama folder session aman.
+const SESSION_DIR = process.env.SESSION_DIR || "session";
+const AUTO_START_BOT = process.env.AUTO_START_BOT !== "false";
+
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
@@ -1067,6 +1074,9 @@ async function stopSocket() {
 
   sockInstance = null;
   isConnected = false;
+
+  // Jangan hapus folder session di sini.
+  // Stop socket hanya memutus proses sementara, bukan logout WA.
 }
 
 async function startBot() {
@@ -1077,7 +1087,7 @@ async function startBot() {
   try {
     clearReconnectTimer();
 
-    const { state, saveCreds } = await useMultiFileAuthState("session");
+    const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
@@ -1785,6 +1795,7 @@ app.get("/status", (req, res) => {
     connected: isConnected,
     hasQR: !!latestQR,
     starting: isStarting,
+    sessionDir: SESSION_DIR,
   });
 });
 
@@ -1795,6 +1806,7 @@ app.get("/qr-json", (req, res) => {
     connected: isConnected,
     hasQR: !!latestQR,
     starting: isStarting,
+    sessionDir: SESSION_DIR,
   });
 });
 
@@ -1845,6 +1857,8 @@ app.get("/qr", (req, res) => {
 
 app.get("/connect", async (req, res) => {
   try {
+    // SAFE CONNECT:
+    // Tidak menghapus session, jadi aman dipakai setelah update/redeploy.
     latestQR = null;
     isConnected = false;
     isStarting = false;
@@ -1853,7 +1867,36 @@ app.get("/connect", async (req, res) => {
 
     await stopSocket();
 
-    await fs.promises.rm("session", {
+    startBot();
+
+    res.json({
+      success: true,
+      message: "WA Engine direstart aman tanpa menghapus session",
+      sessionDir: SESSION_DIR,
+    });
+  } catch (err) {
+    console.log("CONNECT ERROR:", err?.message);
+
+    res.status(500).json({
+      success: false,
+      message: err?.message || "Gagal restart WA Engine",
+    });
+  }
+});
+
+app.get("/reset-session", async (req, res) => {
+  try {
+    // RESET SESSION:
+    // Pakai ini hanya kalau memang mau logout total dan scan QR ulang.
+    latestQR = null;
+    isConnected = false;
+    isStarting = false;
+
+    clearReconnectTimer();
+
+    await stopSocket();
+
+    await fs.promises.rm(SESSION_DIR, {
       recursive: true,
       force: true,
     });
@@ -1862,16 +1905,28 @@ app.get("/connect", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Session lama dihapus, membuat QR baru",
+      message: "Session lama dihapus, QR baru akan dibuat",
+      sessionDir: SESSION_DIR,
     });
   } catch (err) {
-    console.log("CONNECT ERROR:", err?.message);
+    console.log("RESET SESSION ERROR:", err?.message);
 
     res.status(500).json({
       success: false,
-      message: err?.message || "Gagal membuat QR",
+      message: err?.message || "Gagal reset session",
     });
   }
+});
+
+app.get("/reload", async (req, res) => {
+  // Trigger/flow/checkout dibaca langsung dari API setiap ada pesan masuk,
+  // jadi update template di dashboard tidak perlu restart engine.
+  res.json({
+    success: true,
+    message: "Template dibaca live dari API. Tidak perlu restart untuk update trigger/flow/checkout.",
+    connected: isConnected,
+    sessionDir: SESSION_DIR,
+  });
 });
 
 app.get("/logout", async (req, res) => {
@@ -1888,7 +1943,7 @@ app.get("/logout", async (req, res) => {
     isConnected = false;
     isStarting = false;
 
-    await fs.promises.rm("session", {
+    await fs.promises.rm(SESSION_DIR, {
       recursive: true,
       force: true,
     });
@@ -1909,6 +1964,38 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log("SERVER RUNNING DI PORT:", PORT);
+  console.log("SESSION DIR:", SESSION_DIR);
 });
 
-startBot();
+async function gracefulShutdown(signal) {
+  try {
+    console.log("GRACEFUL SHUTDOWN:", signal);
+
+    clearReconnectTimer();
+
+    // Jangan logout dan jangan hapus session.
+    // Ini supaya deploy/update tidak bikin WhatsApp keluar.
+    await stopSocket();
+
+    process.exit(0);
+  } catch (err) {
+    console.log("GRACEFUL SHUTDOWN ERROR:", err?.message);
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+process.on("uncaughtException", (err) => {
+  console.log("UNCAUGHT EXCEPTION:", err?.message);
+  console.log(err?.stack);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.log("UNHANDLED REJECTION:", err?.message || err);
+});
+
+if (AUTO_START_BOT) {
+  startBot();
+}
