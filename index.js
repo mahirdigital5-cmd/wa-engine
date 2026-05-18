@@ -49,6 +49,12 @@ const messageProcessQueues = new Map();
 const recentChatHistories = new Map();
 const MAX_RECENT_CHAT_HISTORY = 10;
 
+// Pesan terakhir yang dikirim bot ke customer.
+// Dipakai supaya jawaban pendek customer seperti "cod" / "transfer"
+// bisa dibaca sebagai jawaban dari pertanyaan bot sebelumnya.
+const lastBotMessages = new Map();
+const MAX_LAST_BOT_MESSAGES = 5;
+
 const AFFIRMATIVE_WORDS = [
   "iya",
   "ya",
@@ -244,6 +250,33 @@ function getRecentChatContext(phone, currentText = "") {
     .filter((item, index, arr) => arr.indexOf(item) === index)
     .filter((item) => item !== currentNormalized)
     .slice(-MAX_RECENT_CHAT_HISTORY)
+    .join(" ");
+}
+
+function rememberBotMessage(jid, text) {
+  if (!jid || !String(text || "").trim()) return;
+
+  const current = lastBotMessages.get(jid) || [];
+
+  const next = [
+    ...current,
+    {
+      text: String(text || ""),
+      normalized: normalizeText(text),
+      at: Date.now(),
+    },
+  ].slice(-MAX_LAST_BOT_MESSAGES);
+
+  lastBotMessages.set(jid, next);
+}
+
+function getLastBotMessageContext(jid) {
+  const history = lastBotMessages.get(jid) || [];
+
+  return history
+    .map((item) => item.normalized)
+    .filter(Boolean)
+    .slice(-MAX_LAST_BOT_MESSAGES)
     .join(" ");
 }
 
@@ -497,6 +530,8 @@ async function sendResponseWithMedia(sock, jid, responseParts, mediaList) {
         text: part,
       });
 
+      rememberBotMessage(jid, part);
+
       console.log("BALASAN TEXT DIKIRIM:", part);
       await wait(650);
     }
@@ -588,9 +623,13 @@ function scheduleFollowups(sock, jid, found) {
           return;
         }
 
+        const followupText = String(followup.message || "").trim();
+
         await sock.sendMessage(jid, {
-          text: String(followup.message || "").trim(),
+          text: followupText,
         });
+
+        rememberBotMessage(jid, followupText);
 
         console.log(
           `FOLLOW UP ${index + 1} DIKIRIM SETELAH ${delayMinutes} MENIT:`,
@@ -1172,6 +1211,386 @@ function shouldBlockGenericCodTriggerPatch(keyword = "", text = "", recentContex
   return false;
 }
 
+
+// === COD FINAL PRIORITY PATCH ===
+function codFinalWords(value = "") {
+  return normalizeText(value).split(" ").filter(Boolean);
+}
+
+function isCodKeywordFinal(keyword = "") {
+  return codFinalWords(keyword).includes("cod");
+}
+
+function isTransferKeywordFinal(keyword = "") {
+  const words = codFinalWords(keyword);
+
+  return (
+    words.includes("transfer") ||
+    words.includes("tranfer") ||
+    words.includes("tf") ||
+    words.includes("trf")
+  );
+}
+
+function isPaymentChoiceQuestionFinal(text = "") {
+  const normalized = normalizeText(text);
+  const words = codFinalWords(text);
+
+  const hasCod = words.includes("cod");
+  const hasTransfer =
+    words.includes("transfer") ||
+    words.includes("tranfer") ||
+    words.includes("tf") ||
+    words.includes("trf");
+
+  const hasChoiceConnector =
+    normalized.includes(" atau ") ||
+    normalized.includes(" ataukah ") ||
+    words.includes("pilih") ||
+    words.includes("mau");
+
+  return hasCod && hasTransfer && hasChoiceConnector;
+}
+
+function isCodAvailabilityQuestionFinal(text = "") {
+  const normalized = normalizeText(text);
+  const words = codFinalWords(text);
+
+  if (!words.includes("cod")) return false;
+  if (isPaymentChoiceQuestionFinal(text)) return false;
+
+  const patterns = [
+    "cod bisa",
+    "bisa cod",
+    "boleh cod",
+    "cod boleh",
+    "ada cod",
+    "cod ada",
+    "support cod",
+    "cod support",
+    "melayani cod",
+    "cod tersedia",
+    "tersedia cod",
+    "apakah cod",
+    "apa bisa cod",
+  ];
+
+  return (
+    String(text || "").includes("?") ||
+    patterns.some((item) => normalized.includes(normalizeText(item)))
+  );
+}
+
+function isCodAvailabilityTriggerFinal(keyword = "") {
+  const normalized = normalizeText(keyword);
+
+  const patterns = [
+    "cod bisa",
+    "bisa cod",
+    "boleh cod",
+    "cod boleh",
+    "ada cod",
+    "cod ada",
+    "support cod",
+    "cod support",
+    "melayani cod",
+    "cod tersedia",
+    "tersedia cod",
+    "apakah cod",
+    "apa bisa cod",
+  ];
+
+  return patterns.some((item) => normalized.includes(normalizeText(item)));
+}
+
+function isCodChoiceTriggerFinal(keyword = "") {
+  const normalized = normalizeText(keyword);
+
+  const patterns = [
+    "mau cod",
+    "cod aja",
+    "cod saja",
+    "pilih cod",
+    "pakai cod",
+    "pake cod",
+    "bayar cod",
+    "pembayaran cod",
+    "metode cod",
+  ];
+
+  return patterns.some((item) => normalized.includes(normalizeText(item)));
+}
+
+function isTransferChoiceTriggerFinal(keyword = "") {
+  const normalized = normalizeText(keyword);
+
+  const patterns = [
+    "mau transfer",
+    "mau tranfer",
+    "transfer aja",
+    "tranfer aja",
+    "transfer saja",
+    "tranfer saja",
+    "pilih transfer",
+    "pilih tranfer",
+    "pakai transfer",
+    "pakai tranfer",
+    "pake transfer",
+    "pake tranfer",
+    "bayar transfer",
+    "bayar tranfer",
+    "pembayaran transfer",
+    "pembayaran tranfer",
+    "metode transfer",
+    "metode tranfer",
+    "mau tf",
+    "tf aja",
+  ];
+
+  return patterns.some((item) => normalized.includes(normalizeText(item)));
+}
+
+function isGenericCodTriggerFinal(keyword = "") {
+  if (!isCodKeywordFinal(keyword)) return false;
+  if (isCodAvailabilityTriggerFinal(keyword)) return false;
+  if (isCodChoiceTriggerFinal(keyword)) return false;
+
+  return true;
+}
+
+function codKeywordSpecificityFinal(keyword = "") {
+  const normalized = normalizeText(keyword);
+  const words = codFinalWords(keyword);
+
+  let score = 0;
+
+  score += words.length * 10;
+
+  if (isCodAvailabilityTriggerFinal(keyword)) score += 100;
+  if (isCodChoiceTriggerFinal(keyword)) score += 70;
+  if (isTransferChoiceTriggerFinal(keyword)) score += 70;
+
+  if (normalized === "cod" || normalized === "cod ka" || normalized === "cod kak") {
+    score -= 80;
+  }
+
+  return score;
+}
+
+function shouldBlockCodTriggerFinal(keyword = "", text = "", allActiveTriggers = []) {
+  const normalizedText = normalizeText(text);
+
+  if (!isCodKeywordFinal(keyword)) return false;
+
+  // Kalimat pilihan pembayaran tidak boleh memanggil trigger COD biasa.
+  // Contoh: "mau cod atau transfer kak?"
+  if (isPaymentChoiceQuestionFinal(normalizedText) && isGenericCodTriggerFinal(keyword)) {
+    return true;
+  }
+
+  // Kalau user nanya ketersediaan COD dan ada trigger yang lebih spesifik
+  // seperti "bisa cod kak?", maka trigger umum "cod ka" diblok.
+  if (
+    isCodAvailabilityQuestionFinal(normalizedText) &&
+    isGenericCodTriggerFinal(keyword)
+  ) {
+    const hasSpecificAvailabilityTrigger = (allActiveTriggers || []).some((item) => {
+      if (!item?.active) return false;
+      if (!isCodAvailabilityTriggerFinal(item.keyword)) return false;
+
+      const candidateKeyword = normalizeText(item.keyword);
+      const candidateWords = codFinalWords(item.keyword);
+
+      // Minimal ada cod + kata spesifik seperti bisa/boleh/ada/support.
+      return candidateWords.length >= 2 && normalizedText.includes("cod");
+    });
+
+    if (hasSpecificAvailabilityTrigger) return true;
+  }
+
+  return false;
+}
+
+function pickBestCodTriggerFinal(list = [], text = "") {
+  const codTriggers = list.filter((item) => isCodKeywordFinal(item.keyword));
+
+  if (codTriggers.length <= 1) return list;
+
+  const nonCodTriggers = list.filter((item) => !isCodKeywordFinal(item.keyword));
+
+  let allowedCodTriggers = codTriggers.filter((item) => {
+    return !shouldBlockCodTriggerFinal(item.keyword, text, list);
+  });
+
+  if (isPaymentChoiceQuestionFinal(text)) {
+    allowedCodTriggers = allowedCodTriggers.filter((item) => {
+      return isCodChoiceTriggerFinal(item.keyword) || isTransferChoiceTriggerFinal(item.keyword);
+    });
+  }
+
+  if (isCodAvailabilityQuestionFinal(text)) {
+    const availabilityTriggers = allowedCodTriggers.filter((item) =>
+      isCodAvailabilityTriggerFinal(item.keyword)
+    );
+
+    if (availabilityTriggers.length > 0) {
+      availabilityTriggers.sort((a, b) => {
+        return (
+          codKeywordSpecificityFinal(b.keyword) -
+          codKeywordSpecificityFinal(a.keyword)
+        );
+      });
+
+      return uniqueTriggers([...nonCodTriggers, availabilityTriggers[0]]);
+    }
+  }
+
+  allowedCodTriggers.sort((a, b) => {
+    return (
+      codKeywordSpecificityFinal(b.keyword) -
+      codKeywordSpecificityFinal(a.keyword)
+    );
+  });
+
+  return uniqueTriggers([
+    ...nonCodTriggers,
+    ...(allowedCodTriggers[0] ? [allowedCodTriggers[0]] : []),
+  ]);
+}
+
+
+// === BOT LAST MESSAGE PAYMENT CHOICE PATCH ===
+function isBotPaymentChoiceQuestion(text = "") {
+  const normalized = normalizeText(text);
+  const words = normalized.split(" ").filter(Boolean);
+
+  const hasCod = words.includes("cod");
+  const hasTransfer =
+    words.includes("transfer") ||
+    words.includes("tranfer") ||
+    words.includes("tf") ||
+    words.includes("trf");
+
+  const hasChoice =
+    normalized.includes(" atau ") ||
+    normalized.includes(" ataukah ") ||
+    words.includes("pilih") ||
+    words.includes("mau");
+
+  return hasCod && hasTransfer && hasChoice;
+}
+
+function isCustomerCodChoiceReply(text = "") {
+  const words = normalizeText(text).split(" ").filter(Boolean);
+
+  if (!words.includes("cod")) return false;
+
+  // Jangan anggap pertanyaan "cod bisa?" sebagai jawaban pilihan.
+  if (
+    words.includes("bisa") ||
+    words.includes("boleh") ||
+    words.includes("ada") ||
+    words.includes("apakah")
+  ) {
+    return false;
+  }
+
+  return words.length <= 6;
+}
+
+function isCustomerTransferChoiceReply(text = "") {
+  const words = normalizeText(text).split(" ").filter(Boolean);
+
+  const hasTransfer =
+    words.includes("transfer") ||
+    words.includes("tranfer") ||
+    words.includes("tf") ||
+    words.includes("trf") ||
+    words.includes("bank");
+
+  if (!hasTransfer) return false;
+
+  return words.length <= 6;
+}
+
+function isCodPaymentChoiceTrigger(keyword = "") {
+  const normalized = normalizeText(keyword);
+
+  return [
+    "cod",
+    "mau cod",
+    "cod aja",
+    "cod saja",
+    "pilih cod",
+    "pakai cod",
+    "pake cod",
+    "bayar cod",
+    "pembayaran cod",
+    "metode cod",
+    "jawab cod",
+  ].some((item) => normalized === normalizeText(item) || normalized.includes(normalizeText(item)));
+}
+
+function isTransferPaymentChoiceTrigger(keyword = "") {
+  const normalized = normalizeText(keyword);
+
+  return [
+    "transfer",
+    "tranfer",
+    "tf",
+    "trf",
+    "mau transfer",
+    "mau tranfer",
+    "transfer aja",
+    "tranfer aja",
+    "transfer saja",
+    "tranfer saja",
+    "pilih transfer",
+    "pilih tranfer",
+    "pakai transfer",
+    "pakai tranfer",
+    "pake transfer",
+    "pake tranfer",
+    "bayar transfer",
+    "bayar tranfer",
+    "pembayaran transfer",
+    "pembayaran tranfer",
+    "metode transfer",
+    "metode tranfer",
+    "jawab transfer",
+    "jawab tranfer",
+  ].some((item) => normalized === normalizeText(item) || normalized.includes(normalizeText(item)));
+}
+
+function isPaymentChoiceContextMatch(keyword = "", incomingText = "", lastBotContext = "") {
+  if (!isBotPaymentChoiceQuestion(lastBotContext)) return false;
+
+  if (
+    isCustomerCodChoiceReply(incomingText) &&
+    isCodPaymentChoiceTrigger(keyword)
+  ) {
+    return true;
+  }
+
+  if (
+    isCustomerTransferChoiceReply(incomingText) &&
+    isTransferPaymentChoiceTrigger(keyword)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function shouldOnlyUsePaymentChoiceTriggers(incomingText = "", lastBotContext = "") {
+  if (!isBotPaymentChoiceQuestion(lastBotContext)) return false;
+
+  return (
+    isCustomerCodChoiceReply(incomingText) ||
+    isCustomerTransferChoiceReply(incomingText)
+  );
+}
+
 async function safeJsonFetch(url, options = {}) {
   const res = await fetch(url, options);
   const text = await res.text();
@@ -1420,15 +1839,27 @@ async function startBot() {
         console.log("JUMLAH TRIGGER:", triggers.length);
         console.log("SESSION AKTIF:", session);
         console.log("COD PATCH DEBUG:", {
-          paymentChoice: isPaymentChoiceQuestionPatch(text),
-          codAvailability: isCodAvailabilityQuestionPatch(text),
-          codChoiceAnswer: isCodChoiceAnswerPatch(text),
+          paymentChoice: typeof isPaymentChoiceQuestionPatch === "function"
+            ? isPaymentChoiceQuestionPatch(text)
+            : false,
+          codAvailability: typeof isCodAvailabilityQuestionPatch === "function"
+            ? isCodAvailabilityQuestionPatch(text)
+            : false,
+          codChoiceAnswer: typeof isCodChoiceAnswerPatch === "function"
+            ? isCodChoiceAnswerPatch(text)
+            : false,
+          lastBotContext: getLastBotMessageContext(phone),
         });
 
         const incomingText = normalizeText(text);
         const recentContextText = getRecentChatContext(phone, text);
+        const lastBotContextText = getLastBotMessageContext(phone);
         const incomingTextWithContext = normalizeText(
           [recentContextText, incomingText].filter(Boolean).join(" ")
+        );
+        const paymentChoiceReplyMode = shouldOnlyUsePaymentChoiceTriggers(
+          incomingText,
+          lastBotContextText
         );
 
         function splitIncomingSegments(value) {
@@ -1531,6 +1962,32 @@ async function startBot() {
 
             if (!keyword || !normalizedSegment) return 0;
 
+            // PAYMENT CHOICE CONTEXT:
+            // Kalau bot terakhir bertanya "mau COD atau transfer?",
+            // jawaban pendek customer "cod" / "transfer" diperlakukan sebagai jawaban pilihan.
+            if (paymentChoiceReplyMode) {
+              return isPaymentChoiceContextMatch(
+                trigger.keyword,
+                normalizedSegment,
+                lastBotContextText
+              )
+                ? 120
+                : 0;
+            }
+
+            // COD FINAL GUARD:
+            // Kalau ada trigger spesifik "bisa cod kak?", trigger umum "cod ka" tidak ikut keluar.
+            // Kalimat "mau cod atau transfer kak?" juga tidak memanggil trigger COD umum.
+            if (
+              shouldBlockCodTriggerFinal(
+                trigger.keyword,
+                normalizedSegment,
+                activeList
+              )
+            ) {
+              return 0;
+            }
+
             // COD PATCH:
             // "cod bisa ka?" tetap boleh trigger COD.
             // "mau cod atau transfer kak?" tidak boleh trigger COD biasa.
@@ -1591,6 +2048,20 @@ async function startBot() {
             );
 
             let score = 0;
+
+            if (
+              isCodAvailabilityQuestionFinal(normalizedSegment) &&
+              isCodAvailabilityTriggerFinal(trigger.keyword)
+            ) {
+              score += 90;
+            }
+
+            if (
+              isPaymentChoiceQuestionFinal(normalizedSegment) &&
+              isGenericCodTriggerFinal(trigger.keyword)
+            ) {
+              score -= 100;
+            }
 
             if (directKeywordMatch) score += 70;
 
@@ -1681,6 +2152,16 @@ async function startBot() {
             .filter((item) => {
               const keyword = normalizeText(item.trigger.keyword);
 
+              if (
+                shouldBlockCodTriggerFinal(
+                  item.trigger.keyword,
+                  incomingText,
+                  activeList
+                )
+              ) {
+                return false;
+              }
+
               // Ambang aman: kalau tidak cukup yakin, jangan kirim apa-apa.
               if (keywordHasAreaPlaceholder(item.trigger.keyword)) return item.score >= 80;
               if (keywordHasQtyPlaceholder(item.trigger.keyword)) return item.score >= 80;
@@ -1736,7 +2217,26 @@ async function startBot() {
           const activeList = list.filter((t) => t.active);
 
           const exactMatches = activeList.filter((t) => {
+            if (paymentChoiceReplyMode) {
+              return isPaymentChoiceContextMatch(
+                t.keyword,
+                incomingText,
+                lastBotContextText
+              );
+            }
+
             if (
+              shouldBlockCodTriggerFinal(
+                t.keyword,
+                incomingText,
+                activeList
+              )
+            ) {
+              return false;
+            }
+
+            if (
+              typeof shouldBlockGenericCodTriggerPatch === "function" &&
               shouldBlockGenericCodTriggerPatch(
                 t.keyword,
                 incomingText,
@@ -1756,6 +2256,14 @@ async function startBot() {
           const containsMatches = activeList.filter((t) => {
             const keyword = normalizeText(t.keyword);
             if (!keyword) return false;
+
+            if (paymentChoiceReplyMode) {
+              return isPaymentChoiceContextMatch(
+                t.keyword,
+                incomingText,
+                lastBotContextText
+              );
+            }
 
             if (keywordHasAreaPlaceholder(t.keyword)) {
               return matchAreaPlaceholderKeyword(incomingText, t.keyword, flows);
@@ -1901,6 +2409,18 @@ async function startBot() {
 
         foundList = uniqueTriggers(foundList);
 
+        if (paymentChoiceReplyMode) {
+          foundList = foundList.filter((item) =>
+            isPaymentChoiceContextMatch(
+              item.keyword,
+              incomingText,
+              lastBotContextText
+            )
+          );
+        }
+
+        foundList = pickBestCodTriggerFinal(foundList, incomingText);
+
         function getFinalTriggerOrderIndex(trigger) {
           const keyword = normalizeText(trigger.keyword);
 
@@ -1957,6 +2477,18 @@ async function startBot() {
             return getFlowIdValue(found.flow_id) === activeFlowId;
           });
         }
+
+        if (paymentChoiceReplyMode) {
+          foundList = foundList.filter((item) =>
+            isPaymentChoiceContextMatch(
+              item.keyword,
+              incomingText,
+              lastBotContextText
+            )
+          );
+        }
+
+        foundList = pickBestCodTriggerFinal(foundList, incomingText);
 
         if (foundList.length === 0) {
           console.log("TRIGGER FINAL KOSONG SETELAH FILTER FLOW:", text);
