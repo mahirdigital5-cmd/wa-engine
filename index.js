@@ -191,152 +191,6 @@ function isShippingTrigger(keyword = "") {
   );
 }
 
-function isCodTrigger(keyword = "") {
-  return normalizeText(keyword).split(" ").includes("cod");
-}
-
-function isCodAvailabilityQuestion(text = "") {
-  const normalized = normalizeText(text);
-  const words = normalized.split(" ");
-
-  if (!words.includes("cod")) return false;
-
-  const questionWords = [
-    "bisa",
-    "boleh",
-    "support",
-    "tersedia",
-    "melayani",
-    "ada",
-    "bisa cod",
-    "cod bisa",
-    "apakah",
-    "apa bisa",
-  ];
-
-  const hasQuestionMark = String(text || "").includes("?");
-  const hasQuestionWord = questionWords.some((word) =>
-    normalized.includes(normalizeText(word))
-  );
-
-  return hasQuestionMark || hasQuestionWord;
-}
-
-function isPaymentChoiceQuestion(text = "") {
-  const normalized = normalizeText(text);
-
-  const asksPaymentChoice =
-    normalized.includes("cod atau transfer") ||
-    normalized.includes("transfer atau cod") ||
-    normalized.includes("mau cod") ||
-    normalized.includes("pilih cod") ||
-    normalized.includes("pembayaran") ||
-    normalized.includes("metode bayar") ||
-    normalized.includes("metode pembayaran");
-
-  const hasChoiceConnector =
-    normalized.includes(" atau ") ||
-    normalized.includes("/transfer") ||
-    normalized.includes("cod transfer") ||
-    normalized.includes("transfer cod");
-
-  return asksPaymentChoice && hasChoiceConnector;
-}
-
-function isCodChoiceAnswer(text = "") {
-  const normalized = normalizeText(text);
-  const words = normalized.split(" ");
-
-  if (!words.includes("cod")) return false;
-
-  const choiceWords = [
-    "mau",
-    "pilih",
-    "pakai",
-    "pake",
-    "ambil",
-    "aja",
-    "saja",
-    "ya",
-    "iya",
-    "oke",
-    "ok",
-    "boleh",
-    "lanjut",
-  ];
-
-  const hasChoiceWord = choiceWords.some((word) => words.includes(word));
-  const isShortCodReply = words.length <= 5 && words.includes("cod");
-
-  return !isCodAvailabilityQuestion(text) && (hasChoiceWord || isShortCodReply);
-}
-
-function isTransferChoiceAnswer(text = "") {
-  const normalized = normalizeText(text);
-  const words = normalized.split(" ");
-
-  const transferWords = ["transfer", "tf", "trf", "bank", "bca", "bri", "mandiri", "bni"];
-  const hasTransferWord = transferWords.some((word) => words.includes(word));
-
-  if (!hasTransferWord) return false;
-
-  const choiceWords = [
-    "mau",
-    "pilih",
-    "pakai",
-    "pake",
-    "aja",
-    "saja",
-    "ya",
-    "iya",
-    "oke",
-    "ok",
-    "boleh",
-    "lanjut",
-  ];
-
-  return choiceWords.some((word) => words.includes(word)) || words.length <= 5;
-}
-
-function isCodChoiceTrigger(keyword = "") {
-  const normalized = normalizeText(keyword);
-  const words = normalized.split(" ");
-
-  if (!words.includes("cod")) return false;
-
-  const choiceTriggerWords = [
-    "mau cod",
-    "cod aja",
-    "cod saja",
-    "pilih cod",
-    "pakai cod",
-    "pake cod",
-    "bayar cod",
-    "pembayaran cod",
-    "metode cod",
-  ];
-
-  return choiceTriggerWords.some((item) => normalized.includes(normalizeText(item)));
-}
-
-function isTransferChoiceTrigger(keyword = "") {
-  const normalized = normalizeText(keyword);
-
-  const choiceTriggerWords = [
-    "mau transfer",
-    "transfer aja",
-    "transfer saja",
-    "pilih transfer",
-    "pakai transfer",
-    "pake transfer",
-    "bayar transfer",
-    "pembayaran transfer",
-    "metode transfer",
-  ];
-
-  return choiceTriggerWords.some((item) => normalized.includes(normalizeText(item)));
-}
-
 function isProductPriceQuestion(text = "") {
   const normalized = normalizeText(text);
 
@@ -1379,9 +1233,6 @@ async function startBot() {
         const incomingTextWithContext = normalizeText(
           [recentContextText, incomingText].filter(Boolean).join(" ")
         );
-        const recentContextLooksLikePaymentChoice = isPaymentChoiceQuestion(recentContextText);
-        const incomingLooksLikeCodChoice = isCodChoiceAnswer(text);
-        const incomingLooksLikeTransferChoice = isTransferChoiceAnswer(text);
 
         function splitIncomingSegments(value) {
           return String(value || "")
@@ -1435,11 +1286,6 @@ async function startBot() {
             "permisi",
             "dong",
             "mau",
-            "aja",
-            "saja",
-            "pilih",
-            "pakai",
-            "pake",
             "cek",
             "boleh",
             "bisa",
@@ -1488,29 +1334,6 @@ async function startBot() {
 
             if (!keyword || !normalizedSegment) return 0;
 
-            const segmentLooksLikeCodChoice = isCodChoiceAnswer(normalizedSegment);
-            const segmentLooksLikeTransferChoice = isTransferChoiceAnswer(normalizedSegment);
-
-            // Penting: bedakan "bisa COD?" dengan jawaban customer "COD aja ka".
-            // Kalau customer sedang menjawab pilihan pembayaran, trigger generic keyword "cod"
-            // jangan ikut keluar. Buat trigger khusus seperti "cod aja" / "mau cod"
-            // untuk balasan pilihan COD.
-            if (
-              isCodTrigger(trigger.keyword) &&
-              !isCodChoiceTrigger(trigger.keyword) &&
-              segmentLooksLikeCodChoice &&
-              (recentContextLooksLikePaymentChoice || !isCodAvailabilityQuestion(normalizedSegment))
-            ) {
-              return 0;
-            }
-
-            if (
-              isTransferChoiceTrigger(trigger.keyword) &&
-              !segmentLooksLikeTransferChoice
-            ) {
-              return 0;
-            }
-
             if (keywordHasAreaPlaceholder(trigger.keyword)) {
               return matchAreaPlaceholderKeyword(normalizedSegment, trigger.keyword, flows)
                 ? 95
@@ -1556,15 +1379,6 @@ async function startBot() {
               !isProductPriceQuestion(normalizedSegment)
             ) {
               score -= 60;
-            }
-
-            // Kalau customer menjawab pilihan pembayaran, prioritaskan trigger khusus pilihan.
-            if (segmentLooksLikeCodChoice && isCodChoiceTrigger(trigger.keyword)) {
-              score += recentContextLooksLikePaymentChoice ? 80 : 55;
-            }
-
-            if (segmentLooksLikeTransferChoice && isTransferChoiceTrigger(trigger.keyword)) {
-              score += recentContextLooksLikePaymentChoice ? 80 : 55;
             }
 
             // Kalau pertanyaan mengarah ke area/ongkir, trigger harga produk diturunkan.
@@ -1645,10 +1459,6 @@ async function startBot() {
 
               if (item.trigger.type === "Sama Persis") return item.score >= 100;
 
-              if (isCodChoiceTrigger(item.trigger.keyword)) return item.score >= 55;
-              if (isTransferChoiceTrigger(item.trigger.keyword)) return item.score >= 55;
-              if (isCodTrigger(item.trigger.keyword) && incomingLooksLikeCodChoice && !isCodChoiceTrigger(item.trigger.keyword)) return false;
-
               if (isShippingTrigger(keyword)) return item.score >= 55;
               if (isProductPriceTrigger(keyword)) return item.score >= 65;
 
@@ -1685,15 +1495,6 @@ async function startBot() {
           const activeList = list.filter((t) => t.active);
 
           const exactMatches = activeList.filter((t) => {
-            if (
-              isCodTrigger(t.keyword) &&
-              !isCodChoiceTrigger(t.keyword) &&
-              incomingLooksLikeCodChoice &&
-              (recentContextLooksLikePaymentChoice || !isCodAvailabilityQuestion(incomingText))
-            ) {
-              return false;
-            }
-
             return incomingText === normalizeText(t.keyword);
           });
 
@@ -1704,19 +1505,6 @@ async function startBot() {
           const containsMatches = activeList.filter((t) => {
             const keyword = normalizeText(t.keyword);
             if (!keyword) return false;
-
-            if (
-              isCodTrigger(t.keyword) &&
-              !isCodChoiceTrigger(t.keyword) &&
-              incomingLooksLikeCodChoice &&
-              (recentContextLooksLikePaymentChoice || !isCodAvailabilityQuestion(incomingText))
-            ) {
-              return false;
-            }
-
-            if (isTransferChoiceTrigger(t.keyword) && !incomingLooksLikeTransferChoice) {
-              return false;
-            }
 
             if (keywordHasAreaPlaceholder(t.keyword)) {
               return matchAreaPlaceholderKeyword(incomingText, t.keyword, flows);
