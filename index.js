@@ -280,6 +280,143 @@ function getLastBotMessageContext(jid) {
     .join(" ");
 }
 
+// === LOCATION REPLY PATCH SUPER AMAN ===
+// Tujuan patch ini:
+// Setelah bot bertanya "untuk pengiriman ke kota/kecamatan mana ka?",
+// customer boleh jawab pendek seperti "balikpapan", "bandung", "malang",
+// "balikpapan tengah", dll. Jawaban pendek itu tetap dianggap lokasi,
+// lalu trigger placeholder [area], [kecamatan], [kota], [kabupaten],
+// atau [kota_kabupaten] bisa jalan tanpa API berbayar.
+function isBotAskingLocationQuestion(text = "") {
+  const normalized = normalizeLocationText(text);
+  const words = normalized.split(" ").filter(Boolean);
+
+  const hasLocationWord = [
+    "pengiriman",
+    "kirim",
+    "ongkir",
+    "alamat",
+    "area",
+    "wilayah",
+    "daerah",
+    "tujuan",
+    "kecamatan",
+    "kota",
+    "kabupaten",
+    "provinsi",
+  ].some((word) => words.includes(word) || normalized.includes(word));
+
+  const hasQuestionWord = [
+    "mana",
+    "dimana",
+    "kemana",
+    "tujuan",
+    "apa",
+    "berapa",
+  ].some((word) => words.includes(word) || normalized.includes(word));
+
+  return hasLocationWord && hasQuestionWord;
+}
+
+function isLikelyStandaloneLocationAnswer(text = "") {
+  const normalized = normalizeLocationText(text);
+  const words = normalized.split(" ").filter(Boolean);
+
+  if (words.length < 1 || words.length > 6) return false;
+
+  // Hanya huruf/spasi supaya angka alamat, nomor rumah, RT/RW tidak salah dianggap lokasi.
+  if (!/^[a-zA-Z\s]+$/.test(String(text || "").trim())) return false;
+
+  const bannedWords = [
+    "iya",
+    "ya",
+    "y",
+    "ok",
+    "oke",
+    "sip",
+    "siap",
+    "baik",
+    "lanjut",
+    "boleh",
+    "gas",
+    "cod",
+    "transfer",
+    "tranfer",
+    "tf",
+    "trf",
+    "bank",
+    "batal",
+    "tidak",
+    "gak",
+    "ga",
+    "nggak",
+    "ngga",
+    "berapa",
+    "harga",
+    "ongkir",
+    "mau",
+    "pesan",
+    "order",
+    "pcs",
+    "pc",
+    "unit",
+  ];
+
+  if (words.some((word) => bannedWords.includes(word))) return false;
+
+  return true;
+}
+
+function getStandaloneLocationParts(text = "") {
+  const normalized = normalizeLocationText(text);
+  const words = normalized.split(" ").filter(Boolean);
+
+  if (!isLikelyStandaloneLocationAnswer(text)) {
+    return { area: "", kecamatan: "", kota_kabupaten: "", kota: "", kabupaten: "" };
+  }
+
+  // Kalau customer cuma jawab "bandung", "malang", "balikpapan":
+  // isi ke area + kecamatan supaya [area] dan [kecamatan] tetap hidup.
+  // kota_kabupaten juga diisi nama yang sama agar trigger [kota_kabupaten]
+  // tetap bisa jalan walaupun customer tidak mengetik lengkap "kota bandung".
+  const value = words.join(" ");
+
+  return {
+    area: titleCaseLocation(value),
+    kecamatan: titleCaseLocation(value),
+    kota_kabupaten: titleCaseLocation(value),
+    kota: titleCaseLocation(value),
+    kabupaten: titleCaseLocation(value),
+  };
+}
+
+function isStandaloneLocationReplyAfterBotQuestion(text = "", lastBotContext = "") {
+  return (
+    isBotAskingLocationQuestion(lastBotContext) &&
+    isLikelyStandaloneLocationAnswer(text)
+  );
+}
+
+function extractLocationPartsSmart(text = "", checkout = null, lastBotContext = "") {
+  const normalParts = extractLocationParts(text, checkout);
+
+  if (
+    normalParts.area ||
+    normalParts.kecamatan ||
+    normalParts.kota_kabupaten ||
+    normalParts.kota ||
+    normalParts.kabupaten
+  ) {
+    return normalParts;
+  }
+
+  if (isStandaloneLocationReplyAfterBotQuestion(text, lastBotContext)) {
+    return getStandaloneLocationParts(text);
+  }
+
+  return normalParts;
+}
+
 function hasAreaPlaceholder(value = "") {
   return normalizeText(value).includes("area");
 }
@@ -491,7 +628,7 @@ function getAreaPlaceholderRegex(keyword = "") {
   return new RegExp(`^${escaped}$`, "i");
 }
 
-function matchAreaPlaceholderKeyword(text = "", keyword = "", flows = []) {
+function matchAreaPlaceholderKeyword(text = "", keyword = "", flows = [], lastBotContext = "") {
   if (!keywordHasAreaPlaceholder(keyword)) return false;
 
   const normalizedText = normalizeLocationText(text);
@@ -505,6 +642,14 @@ function matchAreaPlaceholderKeyword(text = "", keyword = "", flows = []) {
   const regexMatch = regex.test(normalizedText);
 
   if (regexMatch) return true;
+
+  // Jawaban pendek setelah bot tanya lokasi:
+  // "untuk pengiriman ke kota/kecamatan mana ka?"
+  // Customer: "balikpapan" / "bandung" / "malang"
+  // Tetap boleh memicu trigger [kecamatan] [kota_kabupaten].
+  if (isStandaloneLocationReplyAfterBotQuestion(text, lastBotContext)) {
+    return true;
+  }
 
   const fixedWords = normalizedKeyword
     .split(" ")
@@ -2173,7 +2318,7 @@ async function startBot() {
           }
 
           if (keywordHasAreaPlaceholder(keyword)) {
-            return matchAreaPlaceholderKeyword(segment, keyword, flows);
+            return matchAreaPlaceholderKeyword(segment, keyword, flows, lastBotContextText);
           }
 
           if (keywordHasQtyPlaceholder(keyword)) {
@@ -2333,7 +2478,7 @@ async function startBot() {
             }
 
             if (keywordHasAreaPlaceholder(trigger.keyword)) {
-              return matchAreaPlaceholderKeyword(normalizedSegment, trigger.keyword, flows)
+              return matchAreaPlaceholderKeyword(normalizedSegment, trigger.keyword, flows, lastBotContextText)
                 ? 95
                 : 0;
             }
@@ -2622,7 +2767,7 @@ async function startBot() {
             }
 
             if (keywordHasAreaPlaceholder(t.keyword)) {
-              return matchAreaPlaceholderKeyword(incomingText, t.keyword, flows);
+              return matchAreaPlaceholderKeyword(incomingText, t.keyword, flows, lastBotContextText);
             }
 
             if (keywordHasQtyPlaceholder(t.keyword)) {
@@ -2850,7 +2995,7 @@ async function startBot() {
 
           if (keywordHasAreaPlaceholder(trigger.keyword)) {
             for (let i = 0; i < incomingSegments.length; i++) {
-              if (matchAreaPlaceholderKeyword(incomingSegments[i], trigger.keyword, flows)) {
+              if (matchAreaPlaceholderKeyword(incomingSegments[i], trigger.keyword, flows, lastBotContextText)) {
                 return i;
               }
             }
@@ -2928,8 +3073,8 @@ async function startBot() {
 
           const incomingQty = extractQty(text);
           const incomingLocation = triggerCheckout
-            ? extractLocationParts(text, triggerCheckout)
-            : extractLocationParts(text, null);
+            ? extractLocationPartsSmart(text, triggerCheckout, lastBotContextText)
+            : extractLocationPartsSmart(text, null, lastBotContextText);
           const incomingArea = incomingLocation.area || "";
           const incomingName = extractName(text);
           const incomingAddress = cleanAddressText(text);
