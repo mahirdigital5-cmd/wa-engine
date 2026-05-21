@@ -914,6 +914,7 @@ function isNegative(text) {
 
 function looksLikeAddress(text) {
   const normalized = normalizeText(text);
+  const raw = String(text || "").trim();
 
   const addressWords = [
     "jl",
@@ -934,9 +935,98 @@ function looksLikeAddress(text) {
     "rumah",
     "gang",
     "gg",
+    "perum",
+    "komplek",
+    "kompleks",
+    "lantai",
+    "unit",
+    "depan",
+    "samping",
+    "sebelah",
   ];
 
-  return addressWords.some((word) => normalized.includes(word));
+  const words = normalized.split(" ").filter(Boolean);
+  const hasAddressWord = addressWords.some((word) =>
+    words.includes(normalizeText(word)) || normalized.includes(` ${normalizeText(word)} `)
+  );
+
+  const hasNumber = /\d/.test(raw);
+  const hasCommaOrNewLine = /[,\n]/.test(raw);
+  const longEnough = words.length >= 7;
+
+  // Alamat lengkap biasanya punya kata alamat + angka/RT/RW/no rumah,
+  // atau cukup panjang dan ada koma/baris baru.
+  return hasAddressWord || (longEnough && hasNumber) || (longEnough && hasCommaOrNewLine);
+}
+
+// === ADDRESS / ALAMAT FULL PATCH ===
+// Tujuan patch ini: kalau customer mengirim alamat lengkap,
+// engine bisa langsung memilih trigger alamat yang kamu buat,
+// tanpa nyasar ke trigger lokasi, qty, harga, atau keyword umum lain.
+//
+// Cara pakai di dashboard:
+// - Buat keyword trigger: [alamat]
+// - Atau: [address]
+// - Boleh juga pakai mode "Wajib setelah konteks terakhir bot"
+//   dengan konteks contoh: "boleh kirim nama alamat lengkapnya".
+function keywordHasAddressPlaceholder(keyword = "") {
+  return /\[(alamat|address|alamat_lengkap|alamat lengkap)\]/i.test(String(keyword || ""));
+}
+
+function isAddressPlaceholderTrigger(trigger = {}) {
+  return keywordHasAddressPlaceholder(trigger?.keyword || "");
+}
+
+function isAddressKeywordTrigger(keyword = "") {
+  const normalized = normalizeText(keyword);
+
+  if (keywordHasAddressPlaceholder(keyword)) return true;
+
+  const patterns = [
+    "alamat",
+    "alamat lengkap",
+    "data alamat",
+    "kirim alamat",
+    "isi alamat",
+    "nama alamat",
+    "alamat penerima",
+  ];
+
+  return patterns.some((item) => normalized === normalizeText(item));
+}
+
+function isBotAddressQuestion(text = "") {
+  const normalized = normalizeText(text);
+  const words = normalized.split(" ").filter(Boolean);
+
+  const hasAddressWord =
+    words.includes("alamat") ||
+    normalized.includes("alamat lengkap") ||
+    normalized.includes("data penerima") ||
+    normalized.includes("nama penerima") ||
+    normalized.includes("nama alamat") ||
+    normalized.includes("alamat penerima");
+
+  const askingWord =
+    words.includes("kirim") ||
+    words.includes("isi") ||
+    words.includes("tulis") ||
+    words.includes("boleh") ||
+    words.includes("minta") ||
+    words.includes("share") ||
+    words.includes("lengkapi") ||
+    words.includes("lanjut");
+
+  return hasAddressWord && askingWord;
+}
+
+function isAddressReplyAfterBotQuestion(incomingText = "", lastBotContext = "") {
+  return isBotAddressQuestion(lastBotContext) && looksLikeAddress(incomingText);
+}
+
+function matchAddressPlaceholderKeyword(text = "", keyword = "") {
+  if (!keywordHasAddressPlaceholder(keyword)) return false;
+  return looksLikeAddress(text);
 }
 
 function extractQty(text) {
@@ -2246,9 +2336,16 @@ async function startBot() {
           incomingText,
           lastBotContextText
         );
+        const addressReplyMode = isAddressReplyAfterBotQuestion(
+          text,
+          lastBotContextText
+        );
+        const fullAddressMode = looksLikeAddress(text);
 
-        console.log("LOKASI CONTEXT DEBUG:", {
+        console.log("LOKASI / ALAMAT CONTEXT DEBUG:", {
           locationReplyMode,
+          addressReplyMode,
+          fullAddressMode,
           lastBotContextText,
           incomingText,
         });
@@ -2268,6 +2365,10 @@ async function startBot() {
 
           if (keywordHasContextualRule(keyword)) {
             return contextualKeywordMatches(keyword, segment, lastBotContextText);
+          }
+
+          if (keywordHasAddressPlaceholder(keyword)) {
+            return matchAddressPlaceholderKeyword(segment, keyword);
           }
 
           if (keywordHasAreaPlaceholder(keyword)) {
@@ -2370,6 +2471,23 @@ async function startBot() {
                 : 0;
             }
 
+            // ADDRESS FULL PATCH:
+            // Kalau customer kirim alamat lengkap, trigger [alamat] / [address]
+            // diberi skor tinggi agar tidak kalah oleh trigger lokasi/qty/harga.
+            if (keywordHasAddressPlaceholder(trigger.keyword)) {
+              if (looksLikeAddress(text)) return addressReplyMode ? 170 : 145;
+              return matchAddressPlaceholderKeyword(normalizedSegment, trigger.keyword) ? 120 : 0;
+            }
+
+            // Kalau trigger dibuat sebagai keyword "alamat lengkap" biasa,
+            // tetap bantu naik ketika bot terakhir memang minta alamat.
+            if (
+              addressReplyMode &&
+              isAddressKeywordTrigger(trigger.keyword)
+            ) {
+              return 140;
+            }
+
             // COD FINAL GUARD:
             // Kalau ada trigger spesifik "bisa cod kak?", trigger umum "cod ka" tidak ikut keluar.
             // Kalimat "mau cod atau transfer kak?" juga tidak memanggil trigger COD umum.
@@ -2439,6 +2557,12 @@ async function startBot() {
                 normalizedSegment,
                 lastBotContextText
               );
+            }
+
+            if (keywordHasAddressPlaceholder(trigger.keyword)) {
+              return matchAddressPlaceholderKeyword(normalizedSegment, trigger.keyword)
+                ? 120
+                : 0;
             }
 
             if (keywordHasAreaPlaceholder(trigger.keyword)) {
@@ -2593,6 +2717,7 @@ async function startBot() {
               }
 
               // Ambang aman: kalau tidak cukup yakin, jangan kirim apa-apa.
+              if (keywordHasAddressPlaceholder(item.trigger.keyword)) return item.score >= 80;
               if (keywordHasAreaPlaceholder(item.trigger.keyword)) return item.score >= 80;
               if (keywordHasQtyPlaceholder(item.trigger.keyword)) return item.score >= 80;
 
@@ -2714,6 +2839,10 @@ async function startBot() {
               );
             }
 
+            if ((addressReplyMode || fullAddressMode) && isAddressPlaceholderTrigger(t)) {
+              return true;
+            }
+
             if (locationReplyMode && isLocationPlaceholderTrigger(t)) {
               return true;
             }
@@ -2732,6 +2861,10 @@ async function startBot() {
                 incomingText,
                 lastBotContextText
               );
+            }
+
+            if (keywordHasAddressPlaceholder(t.keyword)) {
+              return matchAddressPlaceholderKeyword(incomingText, t.keyword);
             }
 
             if (keywordHasAreaPlaceholder(t.keyword)) {
@@ -2901,13 +3034,30 @@ async function startBot() {
           }
         }
 
+        if (foundList.length === 0 && (addressReplyMode || fullAddressMode)) {
+          // ADDRESS FULL PATCH:
+          // Kalau customer kirim alamat lengkap, cari trigger alamat di SEMUA flow.
+          // Ini sengaja boleh melewati flow aktif, supaya alamat lengkap bisa langsung
+          // masuk trigger [alamat] yang kamu siapkan.
+          const allAddressTriggers = triggers.filter((t) => {
+            if (!t.active) return false;
+            return isAddressPlaceholderTrigger(t) || isAddressKeywordTrigger(t.keyword);
+          });
+
+          foundList = matchTriggers(allAddressTriggers);
+
+          if (foundList.length > 0) {
+            console.log("TRIGGER ALAMAT DARI ALAMAT LENGKAP:", foundList);
+          }
+        }
+
         if (foundList.length === 0 && session?.flow_id) {
           console.log(
             "TIDAK ADA TRIGGER COCOK DI FLOW AKTIF. TIDAK MENCARI KE FLOW LAIN."
           );
         }
 
-        if (foundList.length > 0 && session?.flow_id && !locationReplyMode) {
+        if (foundList.length > 0 && session?.flow_id && !locationReplyMode && !addressReplyMode && !fullAddressMode) {
           const activeFlowId = getFlowIdValue(session.flow_id);
 
           foundList = foundList.filter((t) => {
@@ -2978,6 +3128,16 @@ async function startBot() {
               : Number.MAX_SAFE_INTEGER;
           }
 
+          if (keywordHasAddressPlaceholder(trigger.keyword)) {
+            if (looksLikeAddress(text)) return -700;
+
+            for (let i = 0; i < incomingSegments.length; i++) {
+              if (matchAddressPlaceholderKeyword(incomingSegments[i], trigger.keyword)) {
+                return i;
+              }
+            }
+          }
+
           if (keywordHasAreaPlaceholder(trigger.keyword)) {
             for (let i = 0; i < incomingSegments.length; i++) {
               if (matchAreaPlaceholderKeyword(incomingSegments[i], trigger.keyword, flows)) {
@@ -3023,7 +3183,7 @@ async function startBot() {
           return normalizeText(b.keyword).length - normalizeText(a.keyword).length;
         });
 
-        if (session?.flow_id && !locationReplyMode) {
+        if (session?.flow_id && !locationReplyMode && !addressReplyMode && !fullAddressMode) {
           const activeFlowId = getFlowIdValue(session.flow_id);
 
           foundList = foundList.filter((found) => {
@@ -3043,6 +3203,16 @@ async function startBot() {
         }
 
         foundList = pickBestCodTriggerFinal(foundList, incomingText);
+
+        if (addressReplyMode || fullAddressMode) {
+          const addressOnly = foundList.filter((item) => {
+            return isAddressPlaceholderTrigger(item) || isAddressKeywordTrigger(item.keyword);
+          });
+
+          if (addressOnly.length > 0) {
+            foundList = uniqueTriggers(addressOnly).slice(0, 1);
+          }
+        }
 
         if (foundList.length === 0) {
           console.log("TRIGGER FINAL KOSONG SETELAH FILTER FLOW:", text);
