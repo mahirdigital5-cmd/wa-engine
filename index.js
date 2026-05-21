@@ -91,6 +91,11 @@ const ANSWER_SEPARATOR = "\n---JAWABAN_BARU---\n";
 const SESSION_DIR = process.env.SESSION_DIR || "session";
 const AUTO_START_BOT = process.env.AUTO_START_BOT !== "false";
 
+// Gratis: pakai API statis wilayah Indonesia.
+// Default Wilayah.id. Bisa diganti ke GitHub Pages sendiri via env WILAYAH_API_BASE.
+const WILAYAH_API_BASE = process.env.WILAYAH_API_BASE || "https://wilayah.id/api";
+const WILAYAH_LOOKUP_ENABLED = process.env.WILAYAH_LOOKUP_ENABLED !== "false";
+
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
@@ -938,11 +943,11 @@ function getCheckoutVariables(checkout, state = {}) {
     nama_jalan: structuredAddress.nama_jalan || "-",
     nomor_rumah: structuredAddress.nomor_rumah || "-",
     rt_rw: structuredAddress.rt_rw || "-",
-    kelurahan: structuredAddress.kelurahan || "-",
-    kecamatan: structuredAddress.kecamatan || "-",
-    kode_pos: structuredAddress.kode_pos || "-",
-    kota_kabupaten: structuredAddress.kota_kabupaten || "-",
-    provinsi: structuredAddress.provinsi || "-",
+    kelurahan: state.kelurahan || structuredAddress.kelurahan || "-",
+    kecamatan: state.kecamatan || structuredAddress.kecamatan || "-",
+    kode_pos: state.kode_pos || structuredAddress.kode_pos || "-",
+    kota_kabupaten: state.kota_kabupaten || structuredAddress.kota_kabupaten || "-",
+    provinsi: state.provinsi || structuredAddress.provinsi || "-",
     maps: state.maps || "-",
     link_maps: state.maps || "-",
     patokan: state.patokan || "-",
@@ -1990,6 +1995,11 @@ function extractOrderFormState(text = "", checkout = null, previousState = {}) {
     payment_method: paymentMethod || previousState.payment_method || "",
     qty: qty || Number(previousState.qty) || 1,
     area: area || previousState.area || "",
+    kelurahan: previousState.kelurahan || "",
+    kecamatan: previousState.kecamatan || "",
+    kota_kabupaten: previousState.kota_kabupaten || "",
+    provinsi: previousState.provinsi || "",
+    kode_pos: previousState.kode_pos || "",
     form_received: looksLikeOrderForm(text) || previousState.form_received === true,
     confirmation_status: previousState.confirmation_status || "menunggu_konfirmasi",
   };
@@ -2204,6 +2214,254 @@ function structureAddress(address = "") {
     kota_kabupaten: kotaKabupaten || "-",
     provinsi: provinsi || "-",
     alamat_rapi: formatted,
+  };
+}
+
+
+// === FREE WILAYAH INDONESIA LOOKUP PATCH ===
+const wilayahCache = {
+  provinces: null,
+  regenciesByProvince: new Map(),
+  districtsByRegency: new Map(),
+  villagesByDistrict: new Map(),
+  allRegencies: null,
+};
+
+function normalizeWilayahName(value = "") {
+  return normalizeText(value)
+    .replace(/\b(kota administrasi|kabupaten administrasi|kota|kabupaten|kab|kec|kecamatan|kel|kelurahan|desa|provinsi|daerah khusus ibukota|dki)\b/g, " ")
+    .replace(/\bjakarta raya\b/g, "jakarta")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeJakartaProvince(value = "") {
+  const normalized = normalizeText(value);
+  if (
+    normalized.includes("daerah khusus ibukota jakarta") ||
+    normalized.includes("dki jakarta") ||
+    normalized.includes("jakarta raya")
+  ) {
+    return "jakarta";
+  }
+
+  return normalizeWilayahName(value);
+}
+
+function getWilayahItemCode(item = {}) {
+  return item.code || item.id || "";
+}
+
+function getWilayahItemName(item = {}) {
+  return item.name || item.nama || "";
+}
+
+async function fetchWilayahData(path = "") {
+  const url = `${WILAYAH_API_BASE.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    throw new Error(`Gagal ambil wilayah: ${res.status} ${url}`);
+  }
+
+  const json = await res.json();
+
+  return Array.isArray(json) ? json : json?.data || [];
+}
+
+async function getWilayahProvinces() {
+  if (!WILAYAH_LOOKUP_ENABLED) return [];
+  if (wilayahCache.provinces) return wilayahCache.provinces;
+
+  wilayahCache.provinces = await fetchWilayahData("provinces.json");
+  return wilayahCache.provinces;
+}
+
+async function getWilayahRegencies(provinceCode) {
+  if (!WILAYAH_LOOKUP_ENABLED || !provinceCode) return [];
+  if (wilayahCache.regenciesByProvince.has(provinceCode)) {
+    return wilayahCache.regenciesByProvince.get(provinceCode);
+  }
+
+  const list = await fetchWilayahData(`regencies/${provinceCode}.json`);
+  wilayahCache.regenciesByProvince.set(provinceCode, list);
+
+  return list;
+}
+
+async function getAllWilayahRegencies() {
+  if (wilayahCache.allRegencies) return wilayahCache.allRegencies;
+
+  const provinces = await getWilayahProvinces();
+  const all = [];
+
+  for (const province of provinces) {
+    const provinceCode = getWilayahItemCode(province);
+    const provinceName = getWilayahItemName(province);
+
+    try {
+      const regencies = await getWilayahRegencies(provinceCode);
+
+      for (const regency of regencies) {
+        all.push({
+          ...regency,
+          province_code: provinceCode,
+          province_name: provinceName,
+        });
+      }
+    } catch (err) {
+      console.log("SKIP REGENCY WILAYAH:", provinceName, err?.message);
+    }
+  }
+
+  wilayahCache.allRegencies = all;
+  return all;
+}
+
+async function getWilayahDistricts(regencyCode) {
+  if (!WILAYAH_LOOKUP_ENABLED || !regencyCode) return [];
+  if (wilayahCache.districtsByRegency.has(regencyCode)) {
+    return wilayahCache.districtsByRegency.get(regencyCode);
+  }
+
+  const list = await fetchWilayahData(`districts/${regencyCode}.json`);
+  wilayahCache.districtsByRegency.set(regencyCode, list);
+
+  return list;
+}
+
+async function getWilayahVillages(districtCode) {
+  if (!WILAYAH_LOOKUP_ENABLED || !districtCode) return [];
+  if (wilayahCache.villagesByDistrict.has(districtCode)) {
+    return wilayahCache.villagesByDistrict.get(districtCode);
+  }
+
+  const list = await fetchWilayahData(`villages/${districtCode}.json`);
+  wilayahCache.villagesByDistrict.set(districtCode, list);
+
+  return list;
+}
+
+function findBestWilayahMatch(list = [], text = "", options = {}) {
+  const normalizedText = options.jakartaProvince
+    ? normalizeJakartaProvince(text)
+    : normalizeWilayahName(text);
+
+  const candidates = list
+    .map((item) => {
+      const name = getWilayahItemName(item);
+      const normalizedName = options.jakartaProvince
+        ? normalizeJakartaProvince(name)
+        : normalizeWilayahName(name);
+
+      if (!normalizedName) return null;
+
+      let score = 0;
+
+      if (normalizedText.includes(normalizedName)) {
+        score += normalizedName.length * 3;
+      }
+
+      const words = normalizedName.split(" ").filter(Boolean);
+      const matchedWords = words.filter((word) => normalizedText.includes(word));
+
+      if (words.length > 0) {
+        score += Math.round((matchedWords.length / words.length) * 50);
+      }
+
+      // Hindari match terlalu umum seperti "jakarta" untuk kota,
+      // kecuali tidak ada kandidat lain.
+      if (normalizedName.length <= 4) score -= 10;
+
+      return {
+        item,
+        name,
+        normalizedName,
+        score,
+      };
+    })
+    .filter(Boolean)
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  return candidates[0]?.item || null;
+}
+
+async function lookupAddressWithFreeWilayah(address = "") {
+  try {
+    if (!WILAYAH_LOOKUP_ENABLED) return null;
+
+    const raw = String(address || "").trim();
+    if (!raw || raw.length < 8) return null;
+
+    const provinces = await getWilayahProvinces();
+    let province = findBestWilayahMatch(provinces, raw, {
+      jakartaProvince: true,
+    });
+
+    let regency = null;
+
+    if (province) {
+      const regencies = await getWilayahRegencies(getWilayahItemCode(province));
+      regency = findBestWilayahMatch(regencies, raw);
+    }
+
+    if (!regency) {
+      const allRegencies = await getAllWilayahRegencies();
+      regency = findBestWilayahMatch(allRegencies, raw);
+
+      if (regency?.province_code) {
+        province = {
+          code: regency.province_code,
+          id: regency.province_code,
+          name: regency.province_name,
+        };
+      }
+    }
+
+    let district = null;
+
+    if (regency) {
+      const districts = await getWilayahDistricts(getWilayahItemCode(regency));
+      district = findBestWilayahMatch(districts, raw);
+    }
+
+    let village = null;
+
+    if (district) {
+      const villages = await getWilayahVillages(getWilayahItemCode(district));
+      village = findBestWilayahMatch(villages, raw);
+    }
+
+    const result = {
+      provinsi: getWilayahItemName(province) || "",
+      kota_kabupaten: getWilayahItemName(regency) || "",
+      kecamatan: getWilayahItemName(district) || "",
+      kelurahan: getWilayahItemName(village) || "",
+    };
+
+    const hasAny = Object.values(result).some(Boolean);
+
+    return hasAny ? result : null;
+  } catch (err) {
+    console.log("WILAYAH LOOKUP ERROR:", err?.message);
+    return null;
+  }
+}
+
+async function enrichOrderStateWithFreeWilayah(state = {}) {
+  const address = state.address || state.alamat || "";
+  const wilayah = await lookupAddressWithFreeWilayah(address);
+
+  if (!wilayah) return state;
+
+  return {
+    ...state,
+    provinsi: wilayah.provinsi || state.provinsi || "",
+    kota_kabupaten: wilayah.kota_kabupaten || state.kota_kabupaten || "",
+    kecamatan: wilayah.kecamatan || state.kecamatan || "",
+    kelurahan: wilayah.kelurahan || state.kelurahan || "",
+    wilayah_lookup_source: "free_wilayah_api",
   };
 }
 
@@ -3279,6 +3537,10 @@ async function startBot() {
             text,
             checkoutForForm,
             currentSessionCheckoutState
+          );
+
+          orderFormStateFromIncoming = await enrichOrderStateWithFreeWilayah(
+            orderFormStateFromIncoming
           );
 
           await saveCheckoutState(phone, session, orderFormStateFromIncoming);
