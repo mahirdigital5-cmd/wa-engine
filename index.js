@@ -918,6 +918,7 @@ function getCheckoutVariables(checkout, state = {}) {
   const area = state.area || "";
   const totals = getCheckoutTotal(checkout, qty, area);
   const pesanan = `${checkout.productName} ${qty} pcs`;
+  const structuredAddress = structureAddress(state.address || "");
 
   return {
     area: area || "sesuai alamat",
@@ -932,6 +933,16 @@ function getCheckoutVariables(checkout, state = {}) {
     nomor_wa: state.phone_number || "-",
     nomor_alternatif: state.alternative_phone || "-",
     alamat: state.address || "-",
+    alamat_rapi: structuredAddress.alamat_rapi || "-",
+    alamat_jalan: structuredAddress.alamat_jalan || "-",
+    nama_jalan: structuredAddress.nama_jalan || "-",
+    nomor_rumah: structuredAddress.nomor_rumah || "-",
+    rt_rw: structuredAddress.rt_rw || "-",
+    kelurahan: structuredAddress.kelurahan || "-",
+    kecamatan: structuredAddress.kecamatan || "-",
+    kode_pos: structuredAddress.kode_pos || "-",
+    kota_kabupaten: structuredAddress.kota_kabupaten || "-",
+    provinsi: structuredAddress.provinsi || "-",
     maps: state.maps || "-",
     link_maps: state.maps || "-",
     patokan: state.patokan || "-",
@@ -1890,7 +1901,18 @@ function extractOrderFormAddress(text = "") {
 
   if (explicit) return explicit;
 
-  const lines = String(text || "").split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const raw = String(text || "").trim();
+
+  // Kalau customer langsung kirim alamat panjang satu baris.
+  if (
+    raw.length >= 25 &&
+    /,/.test(raw) &&
+    /\b(jl|jalan|kec|kecamatan|kota|kabupaten|provinsi|jakarta|rt|rw|kode pos|\d{5})\b/i.test(raw)
+  ) {
+    return cleanupAddressValue(raw);
+  }
+
+  const lines = raw.split(/\n+/).map((line) => line.trim()).filter(Boolean);
   const addressLines = lines.filter((line) => {
     const normalized = normalizeText(line);
     return [
@@ -1910,7 +1932,13 @@ function looksLikeOrderForm(text = "") {
   ];
 
   const count = formSignals.filter((signal) => normalized.includes(normalizeText(signal))).length;
-  return count >= 2 && normalized.length >= 20;
+
+  const looksLikeDirectAddress =
+    String(text || "").length >= 25 &&
+    /,/.test(String(text || "")) &&
+    /\b(jl|jalan|kec|kecamatan|kota|kabupaten|provinsi|jakarta|rt|rw|\d{5})\b/i.test(String(text || ""));
+
+  return (count >= 2 && normalized.length >= 20) || looksLikeDirectAddress;
 }
 
 function keywordHasOrderFormPlaceholder(keyword = "") {
@@ -1989,6 +2017,194 @@ function isOrderConfirmationRevision(text = "") {
     normalized.includes("salah") ||
     normalized.includes("alamatnya")
   );
+}
+
+
+// === ADDRESS STRUCTURING PATCH ===
+function cleanupAddressValue(value = "") {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+,/g, ",")
+    .replace(/,\s*/g, ", ")
+    .trim()
+    .replace(/^,\s*/, "")
+    .replace(/,\s*$/, "");
+}
+
+function extractPostalCodeFromAddress(address = "") {
+  const match = String(address || "").match(/\b\d{5}\b/);
+  return match?.[0] || "";
+}
+
+function extractRtRwFromAddress(address = "") {
+  const raw = String(address || "");
+  const rt = raw.match(/\bRT\.?\s*0*(\d{1,3})\b/i)?.[1] || "";
+  const rw = raw.match(/\bRW\.?\s*0*(\d{1,3})\b/i)?.[1] || "";
+
+  if (rt && rw) return `RT ${rt}/RW ${rw}`;
+  if (rt) return `RT ${rt}`;
+  if (rw) return `RW ${rw}`;
+
+  return "";
+}
+
+function extractHouseNumberFromAddress(address = "") {
+  const raw = String(address || "");
+
+  const patterns = [
+    /\bNo\.?\s*Kav\.?\s*([A-Za-z0-9\-\/]+)\b/i,
+    /\bKav\.?\s*([A-Za-z0-9\-\/]+)\b/i,
+    /\bNo\.?\s*([A-Za-z0-9\-\/]+)\b/i,
+    /\bNomor\s*([A-Za-z0-9\-\/]+)\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (match?.[1]) {
+      const prefix = /kav/i.test(match[0]) ? "Kav" : "No";
+      return `${prefix} ${match[1]}`.trim();
+    }
+  }
+
+  return "";
+}
+
+function extractStreetFromAddress(address = "") {
+  const raw = cleanupAddressValue(address);
+  const parts = raw.split(",").map((item) => cleanupAddressValue(item)).filter(Boolean);
+
+  const streetPart =
+    parts.find((part) => /\b(jl|jalan|gg|gang)\b/i.test(part)) ||
+    parts.find((part) => /\b(no|nomor|kav)\b/i.test(part)) ||
+    parts[0] ||
+    "";
+
+  const buildingPart =
+    parts[0] &&
+    streetPart &&
+    parts[0] !== streetPart &&
+    !/\b(kec|kel|kota|kab|provinsi|daerah khusus|dki)\b/i.test(parts[0])
+      ? parts[0]
+      : "";
+
+  return cleanupAddressValue([buildingPart, streetPart].filter(Boolean).join(", "));
+}
+
+function extractKecamatanFromAddress(address = "") {
+  const raw = String(address || "");
+  const match =
+    raw.match(/\bKec\.?\s*([^,]+)/i) ||
+    raw.match(/\bKecamatan\s*([^,]+)/i);
+
+  return cleanupAddressValue(match?.[1] || "");
+}
+
+function extractKelurahanFromAddress(address = "") {
+  const raw = String(address || "");
+  const explicit =
+    raw.match(/\bKel\.?\s*([^,]+)/i) ||
+    raw.match(/\bKelurahan\s*([^,]+)/i) ||
+    raw.match(/\bDesa\s*([^,]+)/i);
+
+  if (explicit?.[1]) return cleanupAddressValue(explicit[1]);
+
+  const parts = raw.split(",").map((item) => cleanupAddressValue(item)).filter(Boolean);
+  const kecIndex = parts.findIndex((part) => /\b(kec|kecamatan)\b/i.test(part));
+
+  if (kecIndex > 0) {
+    const candidate = parts[kecIndex - 1];
+
+    if (
+      candidate &&
+      !/\b(jl|jalan|no|nomor|kav|rt|rw|gedung|tower|blok|gang|gg)\b/i.test(candidate)
+    ) {
+      return candidate;
+    }
+  }
+
+  return "";
+}
+
+function extractCityFromAddress(address = "") {
+  const raw = String(address || "");
+  const explicit =
+    raw.match(/\bKota\s*([^,]+)/i) ||
+    raw.match(/\bKabupaten\s*([^,]+)/i) ||
+    raw.match(/\bKab\.?\s*([^,]+)/i);
+
+  if (explicit?.[0]) return cleanupAddressValue(explicit[0]);
+
+  const parts = raw.split(",").map((item) => cleanupAddressValue(item)).filter(Boolean);
+  const city = parts.find((part) =>
+    /\b(jakarta|bekasi|depok|bogor|tangerang|bandung|surabaya|balikpapan|samarinda)\b/i.test(part)
+  );
+
+  return cleanupAddressValue(city || "");
+}
+
+function extractProvinceFromAddress(address = "") {
+  const raw = String(address || "");
+  const parts = raw.split(",").map((item) => cleanupAddressValue(item)).filter(Boolean);
+
+  const explicit = parts.find((part) =>
+    /\b(provinsi|jawa|banten|jakarta|daerah khusus|dki|kalimantan|sumatera|sulawesi|bali|papua)\b/i.test(part)
+  );
+
+  if (explicit) {
+    return cleanupAddressValue(explicit.replace(/\b\d{5}\b/g, ""));
+  }
+
+  return "";
+}
+
+function structureAddress(address = "") {
+  const raw = cleanupAddressValue(address);
+  const kodePos = extractPostalCodeFromAddress(raw);
+  const rtRw = extractRtRwFromAddress(raw);
+  const nomorRumah = extractHouseNumberFromAddress(raw);
+  const jalan = extractStreetFromAddress(raw);
+  const kelurahan = extractKelurahanFromAddress(raw);
+  const kecamatan = extractKecamatanFromAddress(raw);
+  const kotaKabupaten = extractCityFromAddress(raw);
+  const provinsi = extractProvinceFromAddress(raw);
+
+  const jalanLine = cleanupAddressValue(
+    [jalan, nomorRumah, rtRw].filter(Boolean).join(", ")
+  );
+
+  const kelKecLine = cleanupAddressValue(
+    [
+      kelurahan ? `Kel. ${kelurahan}` : "",
+      kecamatan ? `Kec. ${kecamatan}` : "",
+    ]
+      .filter(Boolean)
+      .join(", ")
+  );
+
+  const formatted = [
+    jalanLine || raw,
+    "Patokan jelas: -",
+    kelKecLine,
+    kodePos ? `Kode pos: ${kodePos}` : "Kode pos: -",
+    kotaKabupaten ? `Kota/Kabupaten: ${kotaKabupaten}` : "Kota/Kabupaten: -",
+    provinsi ? `Provinsi: ${provinsi}` : "Provinsi: -",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return {
+    raw,
+    alamat_jalan: jalanLine || raw,
+    nama_jalan: jalan || "-",
+    nomor_rumah: nomorRumah || "-",
+    rt_rw: rtRw || "-",
+    kelurahan: kelurahan || "-",
+    kecamatan: kecamatan || "-",
+    kode_pos: kodePos || "-",
+    kota_kabupaten: kotaKabupaten || "-",
+    provinsi: provinsi || "-",
+    alamat_rapi: formatted,
+  };
 }
 
 async function safeJsonFetch(url, options = {}) {
