@@ -91,11 +91,6 @@ const ANSWER_SEPARATOR = "\n---JAWABAN_BARU---\n";
 const SESSION_DIR = process.env.SESSION_DIR || "session";
 const AUTO_START_BOT = process.env.AUTO_START_BOT !== "false";
 
-// Gratis: pakai API statis wilayah Indonesia.
-// Default Wilayah.id. Bisa diganti ke GitHub Pages sendiri via env WILAYAH_API_BASE.
-const WILAYAH_API_BASE = process.env.WILAYAH_API_BASE || "https://wilayah.id/api";
-const WILAYAH_LOOKUP_ENABLED = process.env.WILAYAH_LOOKUP_ENABLED !== "false";
-
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
@@ -290,7 +285,118 @@ function hasAreaPlaceholder(value = "") {
 }
 
 function keywordHasAreaPlaceholder(keyword = "") {
-  return String(keyword || "").toLowerCase().includes("[area]");
+  return keywordHasLocationPlaceholder(keyword);
+}
+
+// Placeholder lokasi gratis 100% tanpa API berbayar.
+// Mendukung trigger: [area], [kecamatan], [kec], [kota], [kabupaten], [kota_kabupaten]
+function keywordHasLocationPlaceholder(keyword = "") {
+  return /\[(area|kecamatan|kec|kota|kabupaten|kab|kota_kabupaten|kota kabupaten)\]/i.test(
+    String(keyword || "")
+  );
+}
+
+function normalizeLocationText(value = "") {
+  return normalizeText(value)
+    .replace(/\bkec\b/g, "kecamatan")
+    .replace(/\bkab\b/g, "kabupaten")
+    .replace(/\bkota kab\b/g, "kota kabupaten")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titleCaseLocation(value = "") {
+  const cleaned = normalizeLocationText(value);
+  if (!cleaned) return "";
+
+  return cleaned
+    .split(" ")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function splitKnownAreaToLocationParts(area = "") {
+  const normalized = normalizeLocationText(area);
+  const words = normalized.split(" ").filter(Boolean);
+
+  if (!normalized) {
+    return { area: "", kecamatan: "", kota_kabupaten: "", kota: "", kabupaten: "" };
+  }
+
+  let kotaKabupaten = "";
+  let kecamatan = normalized;
+
+  const kotaIndex = words.indexOf("kota");
+  const kabupatenIndex = words.indexOf("kabupaten");
+
+  if (kotaIndex !== -1 && kotaIndex < words.length - 1) {
+    kotaKabupaten = words.slice(kotaIndex).join(" ");
+    kecamatan = words.slice(0, kotaIndex).join(" ");
+  } else if (kabupatenIndex !== -1 && kabupatenIndex < words.length - 1) {
+    kotaKabupaten = words.slice(kabupatenIndex).join(" ");
+    kecamatan = words.slice(0, kabupatenIndex).join(" ");
+  } else if (words.length >= 3) {
+    // Contoh: "balikpapan tengah balikpapan" -> kecamatan "balikpapan tengah", kota "balikpapan"
+    kotaKabupaten = words.slice(-1).join(" ");
+    kecamatan = words.slice(0, -1).join(" ");
+  }
+
+  return {
+    area: titleCaseLocation(normalized),
+    kecamatan: titleCaseLocation(kecamatan || normalized),
+    kota_kabupaten: titleCaseLocation(kotaKabupaten),
+    kota: titleCaseLocation(kotaKabupaten.replace(/^kota\s+/, "")),
+    kabupaten: titleCaseLocation(kotaKabupaten.replace(/^kabupaten\s+/, "")),
+  };
+}
+
+function extractLocationParts(text = "", checkout = null) {
+  const raw = String(text || "");
+  const normalized = normalizeLocationText(raw);
+  const shippingByArea = checkout?.shippingByArea || {};
+
+  for (const area of Object.keys(shippingByArea)) {
+    const areaNorm = normalizeLocationText(area);
+    if (areaNorm && normalized.includes(areaNorm)) {
+      return splitKnownAreaToLocationParts(area);
+    }
+  }
+
+  const patterns = [
+    /kecamatan\s+([a-zA-Z\s]+?)\s+(?:kota|kabupaten|kab)\s+([a-zA-Z\s]+?)(?:\s+berapa|\s+ongkir|\s+ka|\s+kak|\s+min|$)/i,
+    /kec\s+([a-zA-Z\s]+?)\s+(?:kota|kabupaten|kab)\s+([a-zA-Z\s]+?)(?:\s+berapa|\s+ongkir|\s+ka|\s+kak|\s+min|$)/i,
+    /(?:ke|di|untuk|tujuan)\s+([a-zA-Z\s]+?)\s+(?:kota|kabupaten|kab)\s+([a-zA-Z\s]+?)(?:\s+berapa|\s+ongkir|\s+ka|\s+kak|\s+min|$)/i,
+    /(?:ke|di|untuk|tujuan)\s+([a-zA-Z\s]+?)(?:\s+berapa|\s+ongkir|\s+ka|\s+kak|\s+min|$)/i,
+    /(?:ongkir|kirim|cod)\s+(?:ke\s+)?([a-zA-Z\s]+?)(?:\s+berapa|\s+ka|\s+kak|\s+min|$)/i,
+    /([a-zA-Z\s]+?)\s+(?:berapa|ongkir)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (!match?.[1]) continue;
+
+    const kecamatan = normalizeLocationText(match[1])
+      .replace(/\b(kak|ka|min|admin|berapa|ongkir|cod|kirim|ke|di|untuk|tujuan)\b/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const kotaKabupaten = normalizeLocationText(match[2] || "")
+      .replace(/\b(kak|ka|min|admin|berapa|ongkir|cod|kirim)\b/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!kecamatan) continue;
+
+    return {
+      area: titleCaseLocation([kecamatan, kotaKabupaten].filter(Boolean).join(" ")),
+      kecamatan: titleCaseLocation(kecamatan),
+      kota_kabupaten: titleCaseLocation(kotaKabupaten),
+      kota: titleCaseLocation(kotaKabupaten.replace(/^kota\s+/, "")),
+      kabupaten: titleCaseLocation(kotaKabupaten.replace(/^kabupaten\s+/, "")),
+    };
+  }
+
+  return { area: "", kecamatan: "", kota_kabupaten: "", kota: "", kabupaten: "" };
 }
 
 function keywordHasQtyPlaceholder(keyword = "") {
@@ -371,10 +477,15 @@ function textContainsCheckoutArea(text = "", flows = []) {
 }
 
 function getAreaPlaceholderRegex(keyword = "") {
-  const escaped = normalizeText(keyword)
-    .replace(/\barea\b/g, "__AREA__")
+  const token = "zzlokasiplaceholderzz";
+
+  const withToken = String(keyword || "")
+    .replace(/\[(area|kecamatan|kec|kota|kabupaten|kab|kota_kabupaten|kota kabupaten)\]/gi, ` ${token} `);
+
+  const escaped = normalizeLocationText(withToken)
+    .replace(new RegExp(`\\b${token}\\b`, "g"), "__LOCATION__")
     .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-    .replace(/__AREA__/g, "(.+?)")
+    .replace(/__LOCATION__/g, "(.+?)")
     .replace(/\s+/g, "\\s+");
 
   return new RegExp(`^${escaped}$`, "i");
@@ -383,25 +494,23 @@ function getAreaPlaceholderRegex(keyword = "") {
 function matchAreaPlaceholderKeyword(text = "", keyword = "", flows = []) {
   if (!keywordHasAreaPlaceholder(keyword)) return false;
 
-  const normalizedText = normalizeText(text);
-  const normalizedKeyword = normalizeText(keyword).replace(/\barea\b/g, "").trim();
+  const normalizedText = normalizeLocationText(text);
+  const normalizedKeyword = normalizeLocationText(
+    String(keyword || "").replace(/\[(area|kecamatan|kec|kota|kabupaten|kab|kota_kabupaten|kota kabupaten)\]/gi, " ")
+  );
 
   const hasKnownArea = textContainsCheckoutArea(normalizedText, flows);
 
-  // Cocokkan pola seperti:
-  // "ke [area]" -> "ke balikpapan tengah"
-  // "[area] berapa" -> "balikpapan tengah berapa"
   const regex = getAreaPlaceholderRegex(keyword);
   const regexMatch = regex.test(normalizedText);
 
   if (regexMatch) return true;
 
-  // Kalau ada kata tetap dari keyword + area yang dikenal, anggap cocok.
   const fixedWords = normalizedKeyword
     .split(" ")
     .map((word) => word.trim())
     .filter(Boolean)
-    .filter((word) => word !== "area");
+    .filter((word) => !["area", "kecamatan", "kec", "kota", "kabupaten", "kab"].includes(word));
 
   const fixedWordsMatch =
     fixedWords.length === 0 ||
@@ -409,8 +518,12 @@ function matchAreaPlaceholderKeyword(text = "", keyword = "", flows = []) {
 
   if (hasKnownArea && fixedWordsMatch) return true;
 
-  // Contoh: customer hanya chat "Balikpapan Tengah berapa ka"
-  // keyword: "ke [area]" tetap boleh cocok karena area dikenal + ada kata "berapa".
+  const locationParts = extractLocationParts(text, null);
+  const hasExtractedLocation =
+    Boolean(locationParts.kecamatan) || Boolean(locationParts.kota_kabupaten);
+
+  if (hasExtractedLocation && fixedWordsMatch) return true;
+
   if (hasKnownArea && normalizedText.includes("berapa")) return true;
 
   return false;
@@ -845,52 +958,9 @@ function calculateProductPrice(checkout, qty) {
 }
 
 function extractArea(text, checkout) {
-  const normalized = normalizeText(text);
-  const shippingByArea = checkout?.shippingByArea || {};
-
-  // Prioritas 1: cocok dengan daftar ongkir per area di checkout.
-  for (const area of Object.keys(shippingByArea)) {
-    if (normalized.includes(normalizeText(area))) return area;
-  }
-
-  // Prioritas 2: pola umum customer.
-  // Contoh:
-  // "ke balikpapan tengah berapa ka"
-  // "ongkir ke samarinda berapa"
-  // "di kecamatan balikpapan tengah"
-  const destinationPatterns = [
-    /(?:ke|di|untuk|tujuan)\s+([a-zA-Z\s]+?)(?:\s+berapa|\s+ongkir|\s+ka|\s+kak|\s+min|$)/i,
-    /(?:ongkir|kirim|cod)\s+(?:ke\s+)?([a-zA-Z\s]+?)(?:\s+berapa|\s+ka|\s+kak|\s+min|$)/i,
-    /([a-zA-Z\s]+?)\s+(?:berapa|ongkir)/i,
-    /kecamatan\s+([a-zA-Z\s]+)/i,
-    /kec\s+([a-zA-Z\s]+)/i,
-    /kota\s+([a-zA-Z\s]+)/i,
-    /kabupaten\s+([a-zA-Z\s]+)/i,
-    /kab\s+([a-zA-Z\s]+)/i,
-  ];
-
-  for (const pattern of destinationPatterns) {
-    const match = String(text || "").match(pattern);
-    if (match?.[1]) {
-      const cleaned = normalizeText(match[1])
-        .replace(/\b(kak|ka|min|admin|berapa|ongkir|cod)\b/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-
-      if (cleaned) {
-        // Kalau hasil ekstrak mengandung area yang ada di setting, pakai nama settingnya.
-        for (const area of Object.keys(shippingByArea)) {
-          if (cleaned.includes(normalizeText(area))) return area;
-        }
-
-        return cleaned.split(" ").slice(0, 3).join(" ");
-      }
-    }
-  }
-
-  return "";
+  const parts = extractLocationParts(text, checkout);
+  return parts.area || "";
 }
-
 function getShippingPrice(checkout, area) {
   const shippingByArea = checkout?.shippingByArea || {};
   const normalizedArea = normalizeText(area);
@@ -920,18 +990,23 @@ function getCheckoutTotal(checkout, qty, area) {
 
 function getCheckoutVariables(checkout, state = {}) {
   const qty = Number(state.qty) || 1;
-  const area =
-    state.area ||
-    state.kecamatan ||
-    state.kota_kabupaten ||
-    state.wilayah_user_answer ||
-    "";
+  const area = state.area || "";
   const totals = getCheckoutTotal(checkout, qty, area);
   const pesanan = `${checkout.productName} ${qty} pcs`;
-  const structuredAddress = structureAddress(state.address || "");
+  const locationParts = {
+    area,
+    kecamatan: state.kecamatan || "",
+    kota_kabupaten: state.kota_kabupaten || "",
+    kota: state.kota || "",
+    kabupaten: state.kabupaten || "",
+  };
 
   return {
-    area: area || "sesuai alamat",
+    area: locationParts.area || "sesuai alamat",
+    kecamatan: locationParts.kecamatan || locationParts.area || "sesuai alamat",
+    kota_kabupaten: locationParts.kota_kabupaten || "",
+    kota: locationParts.kota || "",
+    kabupaten: locationParts.kabupaten || "",
     qty,
     produk: checkout.productName,
     subtotal: formatRupiah(totals.productTotal),
@@ -939,29 +1014,7 @@ function getCheckoutVariables(checkout, state = {}) {
     total: formatRupiah(totals.total),
     harga: formatRupiah(totals.total),
     nama: state.name || "-",
-    no_hp: state.phone_number || "-",
-    nomor_wa: state.phone_number || "-",
-    nomor_alternatif: state.alternative_phone || "-",
     alamat: state.address || "-",
-    alamat_rapi: structuredAddress.alamat_rapi || "-",
-    alamat_jalan: structuredAddress.alamat_jalan || "-",
-    nama_jalan: structuredAddress.nama_jalan || "-",
-    nomor_rumah: structuredAddress.nomor_rumah || "-",
-    rt_rw: structuredAddress.rt_rw || "-",
-    kelurahan: state.kelurahan || structuredAddress.kelurahan || "-",
-    kecamatan: state.kecamatan || structuredAddress.kecamatan || "-",
-    kode_pos: state.kode_pos || structuredAddress.kode_pos || "-",
-    kota_kabupaten: state.kota_kabupaten || structuredAddress.kota_kabupaten || "-",
-    provinsi: state.provinsi || structuredAddress.provinsi || "-",
-    maps: state.maps || "-",
-    link_maps: state.maps || "-",
-    patokan: state.patokan || "-",
-    jam_terima: state.jam_terima || "-",
-    kurir: state.kurir || "-",
-    pembayaran: state.payment_method || "-",
-    metode_pembayaran: state.payment_method || "-",
-    status_konfirmasi: state.confirmation_status || "-",
-    wilayah_jawaban: state.wilayah_user_answer || "-",
     pesanan,
   };
 }
@@ -1831,868 +1884,6 @@ function onlyDashboardContextModeTriggersForCurrentReply(list = [], incomingText
   return [matches[0]];
 }
 
-
-// === ORDER FORM CONFIRMATION PATCH ===
-function extractFieldByLabels(text = "", labels = []) {
-  const raw = String(text || "");
-  const lines = raw.split(/\n+/).map((line) => line.trim()).filter(Boolean);
-
-  for (const line of lines) {
-    for (const label of labels) {
-      const pattern = new RegExp(`^\\s*${label}\\s*[:=\\-]\\s*(.+)$`, "i");
-      const match = line.match(pattern);
-      if (match?.[1]) return match[1].trim();
-    }
-  }
-
-  for (const label of labels) {
-    const pattern = new RegExp(`${label}\\s*[:=\\-]\\s*([^\\n]+)`, "i");
-    const match = raw.match(pattern);
-    if (match?.[1]) return match[1].trim();
-  }
-
-  return "";
-}
-
-function extractPhoneNumber(text = "") {
-  const explicit = extractFieldByLabels(text, [
-    "no hp", "nomor hp", "no wa", "nomor wa", "whatsapp", "wa", "telp", "telepon"
-  ]);
-
-  if (explicit) return explicit;
-
-  const match = String(text || "").match(/(?:\+62|62|0)8[0-9\s\-]{7,16}/);
-  return match?.[0]?.replace(/\s+/g, " ").trim() || "";
-}
-
-function extractMapsLink(text = "") {
-  const raw = String(text || "");
-  const explicit = extractFieldByLabels(raw, [
-    "maps", "map", "google maps", "link maps", "shareloc", "share location", "lokasi"
-  ]);
-
-  if (explicit && /https?:\/\//i.test(explicit)) return explicit;
-
-  const match = raw.match(/https?:\/\/[^\s]+/i);
-  return match?.[0] || explicit || "";
-}
-
-function extractPatokan(text = "") {
-  return extractFieldByLabels(text, ["patokan", "patokan rumah", "dekat", "sebelah"]);
-}
-
-function extractJamTerima(text = "") {
-  return extractFieldByLabels(text, [
-    "jam bisa menerima", "jam terima", "jam menerima", "jam", "waktu terima"
-  ]);
-}
-
-function extractKurirPilihan(text = "") {
-  return extractFieldByLabels(text, ["kurir", "ekspedisi", "jasa kirim", "pengiriman"]);
-}
-
-function extractPaymentMethod(text = "") {
-  const explicit = extractFieldByLabels(text, [
-    "metode pembayaran", "pembayaran", "bayar", "payment"
-  ]);
-
-  if (explicit) return explicit;
-
-  const normalized = normalizeText(text);
-  if (normalized.includes("transfer") || normalized.includes("tranfer") || normalized.includes("tf")) return "Transfer";
-  if (normalized.includes("cod")) return "COD";
-
-  return "";
-}
-
-function extractOrderFormAddress(text = "") {
-  const explicit = extractFieldByLabels(text, [
-    "alamat", "alamat lengkap", "alamat penerima"
-  ]);
-
-  if (explicit) return explicit;
-
-  const raw = String(text || "").trim();
-
-  // Kalau customer langsung kirim alamat panjang satu baris.
-  if (
-    raw.length >= 25 &&
-    /,/.test(raw) &&
-    /\b(jl|jalan|kec|kecamatan|kota|kabupaten|provinsi|jakarta|rt|rw|kode pos|\d{5})\b/i.test(raw)
-  ) {
-    return cleanupAddressValue(raw);
-  }
-
-  const lines = raw.split(/\n+/).map((line) => line.trim()).filter(Boolean);
-  const addressLines = lines.filter((line) => {
-    const normalized = normalizeText(line);
-    return [
-      "jl", "jalan", "gang", "gg", "blok", "rt", "rw", "kelurahan", "desa",
-      "kecamatan", "kota", "kabupaten", "provinsi", "kode pos", "patokan"
-    ].some((word) => normalized.includes(normalizeText(word)));
-  });
-
-  return addressLines.join(", ");
-}
-
-function looksLikeOrderForm(text = "") {
-  const normalized = normalizeText(text);
-  const formSignals = [
-    "nama", "alamat", "no hp", "nomor hp", "no wa", "nomor wa", "whatsapp",
-    "patokan", "maps", "google maps", "kode pos", "kelurahan", "kecamatan", "rt", "rw"
-  ];
-
-  const count = formSignals.filter((signal) => normalized.includes(normalizeText(signal))).length;
-
-  const looksLikeDirectAddress =
-    String(text || "").length >= 25 &&
-    /,/.test(String(text || "")) &&
-    /\b(jl|jalan|kec|kecamatan|kota|kabupaten|provinsi|jakarta|rt|rw|\d{5})\b/i.test(String(text || ""));
-
-  return (count >= 2 && normalized.length >= 20) || looksLikeDirectAddress;
-}
-
-function keywordHasOrderFormPlaceholder(keyword = "") {
-  const raw = String(keyword || "").toLowerCase();
-  return (
-    raw.includes("[form]") ||
-    raw.includes("[order_form]") ||
-    raw.includes("[form_pemesanan]") ||
-    raw.includes("[konfirmasi_pesanan]")
-  );
-}
-
-function matchOrderFormKeyword(text = "", keyword = "") {
-  if (!keywordHasOrderFormPlaceholder(keyword)) return false;
-  return looksLikeOrderForm(text);
-}
-
-function extractOrderFormState(text = "", checkout = null, previousState = {}) {
-  const name =
-    extractName(text) ||
-    extractFieldByLabels(text, [
-      "nama", "nama lengkap", "nama penerima", "penerima", "atas nama"
-    ]);
-
-  const phoneNumber = extractPhoneNumber(text);
-  const alternativePhone = extractFieldByLabels(text, [
-    "nomor alternatif", "no alternatif", "no hp alternatif", "wa alternatif", "nomor cadangan"
-  ]);
-
-  const address = extractOrderFormAddress(text);
-  const maps = extractMapsLink(text);
-  const patokan = extractPatokan(text);
-  const jamTerima = extractJamTerima(text);
-  const kurir = extractKurirPilihan(text);
-  const paymentMethod = extractPaymentMethod(text);
-  const qty = extractQty(text);
-  const area = checkout ? extractArea(text, checkout) : "";
-
-  return {
-    ...previousState,
-    name: name || previousState.name || "",
-    phone_number: phoneNumber || previousState.phone_number || "",
-    alternative_phone: alternativePhone || previousState.alternative_phone || "",
-    address: address || previousState.address || "",
-    maps: maps || previousState.maps || "",
-    patokan: patokan || previousState.patokan || "",
-    jam_terima: jamTerima || previousState.jam_terima || "",
-    kurir: kurir || previousState.kurir || "",
-    payment_method: paymentMethod || previousState.payment_method || "",
-    qty: qty || Number(previousState.qty) || 1,
-    area: area || previousState.area || "",
-    kelurahan: previousState.kelurahan || "",
-    kecamatan: previousState.kecamatan || "",
-    kota_kabupaten: previousState.kota_kabupaten || "",
-    provinsi: previousState.provinsi || "",
-    kode_pos: previousState.kode_pos || "",
-    form_received: looksLikeOrderForm(text) || previousState.form_received === true,
-    confirmation_status: previousState.confirmation_status || "menunggu_konfirmasi",
-  };
-}
-
-function isOrderConfirmationYes(text = "") {
-  const normalized = normalizeText(text);
-  return (
-    normalized === "ya kirim" ||
-    normalized === "yakirim" ||
-    normalized === "ya dikirim" ||
-    normalized === "iya kirim" ||
-    normalized === "yes kirim" ||
-    normalized.includes("ya kirim") ||
-    normalized.includes("iya kirim")
-  );
-}
-
-function isOrderConfirmationRevision(text = "") {
-  const normalized = normalizeText(text);
-  return (
-    normalized.includes("revisi") ||
-    normalized.includes("ubah") ||
-    normalized.includes("ganti") ||
-    normalized.includes("salah") ||
-    normalized.includes("alamatnya")
-  );
-}
-
-
-// === ADDRESS STRUCTURING PATCH ===
-function cleanupAddressValue(value = "") {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .replace(/\s+,/g, ",")
-    .replace(/,\s*/g, ", ")
-    .trim()
-    .replace(/^,\s*/, "")
-    .replace(/,\s*$/, "");
-}
-
-function extractPostalCodeFromAddress(address = "") {
-  const match = String(address || "").match(/\b\d{5}\b/);
-  return match?.[0] || "";
-}
-
-function extractRtRwFromAddress(address = "") {
-  const raw = String(address || "");
-  const rt = raw.match(/\bRT\.?\s*0*(\d{1,3})\b/i)?.[1] || "";
-  const rw = raw.match(/\bRW\.?\s*0*(\d{1,3})\b/i)?.[1] || "";
-
-  if (rt && rw) return `RT ${rt}/RW ${rw}`;
-  if (rt) return `RT ${rt}`;
-  if (rw) return `RW ${rw}`;
-
-  return "";
-}
-
-function extractHouseNumberFromAddress(address = "") {
-  const raw = String(address || "");
-
-  const patterns = [
-    /\bNo\.?\s*Kav\.?\s*([A-Za-z0-9\-\/]+)\b/i,
-    /\bKav\.?\s*([A-Za-z0-9\-\/]+)\b/i,
-    /\bNo\.?\s*([A-Za-z0-9\-\/]+)\b/i,
-    /\bNomor\s*([A-Za-z0-9\-\/]+)\b/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = raw.match(pattern);
-    if (match?.[1]) {
-      const prefix = /kav/i.test(match[0]) ? "Kav" : "No";
-      return `${prefix} ${match[1]}`.trim();
-    }
-  }
-
-  return "";
-}
-
-function extractStreetFromAddress(address = "") {
-  const raw = cleanupAddressValue(address);
-  const parts = raw.split(",").map((item) => cleanupAddressValue(item)).filter(Boolean);
-
-  const streetPart =
-    parts.find((part) => /\b(jl|jalan|gg|gang)\b/i.test(part)) ||
-    parts.find((part) => /\b(no|nomor|kav)\b/i.test(part)) ||
-    parts[0] ||
-    "";
-
-  const buildingPart =
-    parts[0] &&
-    streetPart &&
-    parts[0] !== streetPart &&
-    !/\b(kec|kel|kota|kab|provinsi|daerah khusus|dki)\b/i.test(parts[0])
-      ? parts[0]
-      : "";
-
-  return cleanupAddressValue([buildingPart, streetPart].filter(Boolean).join(", "));
-}
-
-function extractKecamatanFromAddress(address = "") {
-  const raw = String(address || "");
-  const match =
-    raw.match(/\bKec\.?\s*([^,]+)/i) ||
-    raw.match(/\bKecamatan\s*([^,]+)/i);
-
-  return cleanupAddressValue(match?.[1] || "");
-}
-
-function extractKelurahanFromAddress(address = "") {
-  const raw = String(address || "");
-  const explicit =
-    raw.match(/\bKel\.?\s*([^,]+)/i) ||
-    raw.match(/\bKelurahan\s*([^,]+)/i) ||
-    raw.match(/\bDesa\s*([^,]+)/i);
-
-  if (explicit?.[1]) return cleanupAddressValue(explicit[1]);
-
-  const parts = raw.split(",").map((item) => cleanupAddressValue(item)).filter(Boolean);
-  const kecIndex = parts.findIndex((part) => /\b(kec|kecamatan)\b/i.test(part));
-
-  if (kecIndex > 0) {
-    const candidate = parts[kecIndex - 1];
-
-    if (
-      candidate &&
-      !/\b(jl|jalan|no|nomor|kav|rt|rw|gedung|tower|blok|gang|gg)\b/i.test(candidate)
-    ) {
-      return candidate;
-    }
-  }
-
-  return "";
-}
-
-function extractCityFromAddress(address = "") {
-  const raw = String(address || "");
-  const explicit =
-    raw.match(/\bKota\s*([^,]+)/i) ||
-    raw.match(/\bKabupaten\s*([^,]+)/i) ||
-    raw.match(/\bKab\.?\s*([^,]+)/i);
-
-  if (explicit?.[0]) return cleanupAddressValue(explicit[0]);
-
-  const parts = raw.split(",").map((item) => cleanupAddressValue(item)).filter(Boolean);
-  const city = parts.find((part) =>
-    /\b(jakarta|bekasi|depok|bogor|tangerang|bandung|surabaya|balikpapan|samarinda)\b/i.test(part)
-  );
-
-  return cleanupAddressValue(city || "");
-}
-
-function extractProvinceFromAddress(address = "") {
-  const raw = String(address || "");
-  const parts = raw.split(",").map((item) => cleanupAddressValue(item)).filter(Boolean);
-
-  const explicit = parts.find((part) =>
-    /\b(provinsi|jawa|banten|jakarta|daerah khusus|dki|kalimantan|sumatera|sulawesi|bali|papua)\b/i.test(part)
-  );
-
-  if (explicit) {
-    return cleanupAddressValue(explicit.replace(/\b\d{5}\b/g, ""));
-  }
-
-  return "";
-}
-
-function structureAddress(address = "") {
-  const raw = cleanupAddressValue(address);
-  const kodePos = extractPostalCodeFromAddress(raw);
-  const rtRw = extractRtRwFromAddress(raw);
-  const nomorRumah = extractHouseNumberFromAddress(raw);
-  const jalan = extractStreetFromAddress(raw);
-  const kelurahan = extractKelurahanFromAddress(raw);
-  const kecamatan = extractKecamatanFromAddress(raw);
-  const kotaKabupaten = extractCityFromAddress(raw);
-  const provinsi = extractProvinceFromAddress(raw);
-
-  const jalanLine = cleanupAddressValue(
-    [jalan, nomorRumah, rtRw].filter(Boolean).join(", ")
-  );
-
-  const kelKecLine = cleanupAddressValue(
-    [
-      kelurahan ? `Kel. ${kelurahan}` : "",
-      kecamatan ? `Kec. ${kecamatan}` : "",
-    ]
-      .filter(Boolean)
-      .join(", ")
-  );
-
-  const formatted = [
-    jalanLine || raw,
-    "Patokan jelas: -",
-    kelKecLine,
-    kodePos ? `Kode pos: ${kodePos}` : "Kode pos: -",
-    kotaKabupaten ? `Kota/Kabupaten: ${kotaKabupaten}` : "Kota/Kabupaten: -",
-    provinsi ? `Provinsi: ${provinsi}` : "Provinsi: -",
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  return {
-    raw,
-    alamat_jalan: jalanLine || raw,
-    nama_jalan: jalan || "-",
-    nomor_rumah: nomorRumah || "-",
-    rt_rw: rtRw || "-",
-    kelurahan: kelurahan || "-",
-    kecamatan: kecamatan || "-",
-    kode_pos: kodePos || "-",
-    kota_kabupaten: kotaKabupaten || "-",
-    provinsi: provinsi || "-",
-    alamat_rapi: formatted,
-  };
-}
-
-
-// === FREE WILAYAH INDONESIA LOOKUP PATCH ===
-const wilayahCache = {
-  provinces: null,
-  regenciesByProvince: new Map(),
-  districtsByRegency: new Map(),
-  villagesByDistrict: new Map(),
-  allRegencies: null,
-};
-
-function normalizeWilayahName(value = "") {
-  return normalizeText(value)
-    .replace(/\b(kota administrasi|kabupaten administrasi|kota|kabupaten|kab|kec|kecamatan|kel|kelurahan|desa|provinsi|daerah khusus ibukota|dki)\b/g, " ")
-    .replace(/\bjakarta raya\b/g, "jakarta")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeJakartaProvince(value = "") {
-  const normalized = normalizeText(value);
-  if (
-    normalized.includes("daerah khusus ibukota jakarta") ||
-    normalized.includes("dki jakarta") ||
-    normalized.includes("jakarta raya")
-  ) {
-    return "jakarta";
-  }
-
-  return normalizeWilayahName(value);
-}
-
-function getWilayahItemCode(item = {}) {
-  return item.code || item.id || "";
-}
-
-function getWilayahItemName(item = {}) {
-  return item.name || item.nama || "";
-}
-
-async function fetchWilayahData(path = "") {
-  const url = `${WILAYAH_API_BASE.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
-  const res = await fetch(url);
-
-  if (!res.ok) {
-    throw new Error(`Gagal ambil wilayah: ${res.status} ${url}`);
-  }
-
-  const json = await res.json();
-
-  return Array.isArray(json) ? json : json?.data || [];
-}
-
-async function getWilayahProvinces() {
-  if (!WILAYAH_LOOKUP_ENABLED) return [];
-  if (wilayahCache.provinces) return wilayahCache.provinces;
-
-  wilayahCache.provinces = await fetchWilayahData("provinces.json");
-  return wilayahCache.provinces;
-}
-
-async function getWilayahRegencies(provinceCode) {
-  if (!WILAYAH_LOOKUP_ENABLED || !provinceCode) return [];
-  if (wilayahCache.regenciesByProvince.has(provinceCode)) {
-    return wilayahCache.regenciesByProvince.get(provinceCode);
-  }
-
-  const list = await fetchWilayahData(`regencies/${provinceCode}.json`);
-  wilayahCache.regenciesByProvince.set(provinceCode, list);
-
-  return list;
-}
-
-async function getAllWilayahRegencies() {
-  if (wilayahCache.allRegencies) return wilayahCache.allRegencies;
-
-  const provinces = await getWilayahProvinces();
-  const all = [];
-
-  for (const province of provinces) {
-    const provinceCode = getWilayahItemCode(province);
-    const provinceName = getWilayahItemName(province);
-
-    try {
-      const regencies = await getWilayahRegencies(provinceCode);
-
-      for (const regency of regencies) {
-        all.push({
-          ...regency,
-          province_code: provinceCode,
-          province_name: provinceName,
-        });
-      }
-    } catch (err) {
-      console.log("SKIP REGENCY WILAYAH:", provinceName, err?.message);
-    }
-  }
-
-  wilayahCache.allRegencies = all;
-  return all;
-}
-
-async function getWilayahDistricts(regencyCode) {
-  if (!WILAYAH_LOOKUP_ENABLED || !regencyCode) return [];
-  if (wilayahCache.districtsByRegency.has(regencyCode)) {
-    return wilayahCache.districtsByRegency.get(regencyCode);
-  }
-
-  const list = await fetchWilayahData(`districts/${regencyCode}.json`);
-  wilayahCache.districtsByRegency.set(regencyCode, list);
-
-  return list;
-}
-
-async function getWilayahVillages(districtCode) {
-  if (!WILAYAH_LOOKUP_ENABLED || !districtCode) return [];
-  if (wilayahCache.villagesByDistrict.has(districtCode)) {
-    return wilayahCache.villagesByDistrict.get(districtCode);
-  }
-
-  const list = await fetchWilayahData(`villages/${districtCode}.json`);
-  wilayahCache.villagesByDistrict.set(districtCode, list);
-
-  return list;
-}
-
-function findBestWilayahMatch(list = [], text = "", options = {}) {
-  const normalizedText = options.jakartaProvince
-    ? normalizeJakartaProvince(text)
-    : normalizeWilayahName(text);
-
-  const candidates = list
-    .map((item) => {
-      const name = getWilayahItemName(item);
-      const normalizedName = options.jakartaProvince
-        ? normalizeJakartaProvince(name)
-        : normalizeWilayahName(name);
-
-      if (!normalizedName) return null;
-
-      let score = 0;
-
-      if (normalizedText.includes(normalizedName)) {
-        score += normalizedName.length * 3;
-      }
-
-      const words = normalizedName.split(" ").filter(Boolean);
-      const matchedWords = words.filter((word) => normalizedText.includes(word));
-
-      if (words.length > 0) {
-        score += Math.round((matchedWords.length / words.length) * 50);
-      }
-
-      // Hindari match terlalu umum seperti "jakarta" untuk kota,
-      // kecuali tidak ada kandidat lain.
-      if (normalizedName.length <= 4) score -= 10;
-
-      return {
-        item,
-        name,
-        normalizedName,
-        score,
-      };
-    })
-    .filter(Boolean)
-    .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score);
-
-  return candidates[0]?.item || null;
-}
-
-async function lookupAddressWithFreeWilayah(address = "") {
-  try {
-    if (!WILAYAH_LOOKUP_ENABLED) return null;
-
-    const raw = String(address || "").trim();
-    if (!raw || raw.length < 8) return null;
-
-    const provinces = await getWilayahProvinces();
-    let province = findBestWilayahMatch(provinces, raw, {
-      jakartaProvince: true,
-    });
-
-    let regency = null;
-
-    if (province) {
-      const regencies = await getWilayahRegencies(getWilayahItemCode(province));
-      regency = findBestWilayahMatch(regencies, raw);
-    }
-
-    if (!regency) {
-      const allRegencies = await getAllWilayahRegencies();
-      regency = findBestWilayahMatch(allRegencies, raw);
-
-      if (regency?.province_code) {
-        province = {
-          code: regency.province_code,
-          id: regency.province_code,
-          name: regency.province_name,
-        };
-      }
-    }
-
-    let district = null;
-
-    if (regency) {
-      const districts = await getWilayahDistricts(getWilayahItemCode(regency));
-      district = findBestWilayahMatch(districts, raw);
-    }
-
-    let village = null;
-
-    if (district) {
-      const villages = await getWilayahVillages(getWilayahItemCode(district));
-      village = findBestWilayahMatch(villages, raw);
-    }
-
-    const result = {
-      provinsi: getWilayahItemName(province) || "",
-      kota_kabupaten: getWilayahItemName(regency) || "",
-      kecamatan: getWilayahItemName(district) || "",
-      kelurahan: getWilayahItemName(village) || "",
-    };
-
-    const hasAny = Object.values(result).some(Boolean);
-
-    return hasAny ? result : null;
-  } catch (err) {
-    console.log("WILAYAH LOOKUP ERROR:", err?.message);
-    return null;
-  }
-}
-
-async function enrichOrderStateWithFreeWilayah(state = {}) {
-  const address = state.address || state.alamat || "";
-  const wilayah = await lookupAddressWithFreeWilayah(address);
-
-  if (!wilayah) return state;
-
-  return {
-    ...state,
-    provinsi: wilayah.provinsi || state.provinsi || "",
-    kota_kabupaten: wilayah.kota_kabupaten || state.kota_kabupaten || "",
-    kecamatan: wilayah.kecamatan || state.kecamatan || "",
-    kelurahan: wilayah.kelurahan || state.kelurahan || "",
-    wilayah_lookup_source: "free_wilayah_api",
-  };
-}
-
-
-// === SHORT WILAYAH ANSWER PATCH ===
-function isBotAskingWilayahContext(text = "") {
-  const normalized = normalizeText(text);
-
-  const hasWilayahWord =
-    normalized.includes("kec") ||
-    normalized.includes("kecamatan") ||
-    normalized.includes("kota") ||
-    normalized.includes("kabupaten") ||
-    normalized.includes("kab") ||
-    normalized.includes("provinsi") ||
-    normalized.includes("daerah") ||
-    normalized.includes("wilayah") ||
-    normalized.includes("alamat");
-
-  const hasQuestionIntent =
-    normalized.includes("mana") ||
-    normalized.includes("dimana") ||
-    normalized.includes("di mana") ||
-    normalized.includes("isi") ||
-    normalized.includes("sebutkan") ||
-    normalized.includes("kirim") ||
-    normalized.includes("ketik") ||
-    normalized.includes("lokasi");
-
-  return hasWilayahWord && hasQuestionIntent;
-}
-
-function looksLikeShortWilayahAnswer(text = "") {
-  const raw = String(text || "").trim();
-  const normalized = normalizeText(raw);
-  const words = normalized.split(" ").filter(Boolean);
-
-  if (!normalized) return false;
-  if (normalized.length < 3) return false;
-  if (words.length > 6) return false;
-
-  const blockedWords = [
-    "harga",
-    "berapa",
-    "cod",
-    "transfer",
-    "tf",
-    "ongkir",
-    "pesan",
-    "ambil",
-    "beli",
-    "mau",
-    "pcs",
-    "alamat",
-    "nama",
-    "no",
-    "nomor",
-  ];
-
-  if (blockedWords.some((word) => words.includes(word))) {
-    return false;
-  }
-
-  return /[a-zA-Z]/.test(raw);
-}
-
-function buildWilayahLookupCandidates(text = "") {
-  const raw = String(text || "").trim();
-  const normalized = normalizeText(raw);
-
-  const splitParts = raw
-    .split(/[\/,|]+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-
-  const candidates = [
-    raw,
-    normalized,
-    ...splitParts,
-    ...splitParts.map((item) => normalizeText(item)),
-  ]
-    .map((item) => String(item || "").trim())
-    .filter(Boolean);
-
-  return [...new Set(candidates)];
-}
-
-function cleanWilayahAnswerArea(text = "") {
-  const normalized = normalizeText(text)
-    .replace(/\b(kec|kecamatan|kota|kab|kabupaten|provinsi|daerah)\b/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return normalized || normalizeText(text);
-}
-
-async function lookupShortWilayahAnswer(text = "") {
-  const candidates = buildWilayahLookupCandidates(text);
-
-  for (const candidate of candidates) {
-    const result = await lookupAddressWithFreeWilayah(candidate);
-
-    if (result) {
-      return result;
-    }
-  }
-
-  return null;
-}
-
-async function saveShortWilayahAnswerIfNeeded(phone, session, text = "", lastBotContextText = "") {
-  if (!isBotAskingWilayahContext(lastBotContextText)) return null;
-  if (!looksLikeShortWilayahAnswer(text)) return null;
-
-  const currentState = getSessionCheckoutState(session);
-  const wilayah = await lookupShortWilayahAnswer(text);
-  const cleanedArea = cleanWilayahAnswerArea(text);
-
-  const nextState = {
-    ...currentState,
-    area: currentState.area || cleanedArea,
-    wilayah_user_answer: String(text || "").trim(),
-    wilayah_context_answered_at: new Date().toISOString(),
-  };
-
-  if (wilayah) {
-    nextState.provinsi = wilayah.provinsi || currentState.provinsi || "";
-    nextState.kota_kabupaten =
-      wilayah.kota_kabupaten || currentState.kota_kabupaten || "";
-    nextState.kecamatan = wilayah.kecamatan || currentState.kecamatan || "";
-    nextState.kelurahan = wilayah.kelurahan || currentState.kelurahan || "";
-
-    if (wilayah.kecamatan) {
-      nextState.area = wilayah.kecamatan;
-    } else if (wilayah.kota_kabupaten) {
-      nextState.area = wilayah.kota_kabupaten;
-    } else {
-      nextState.area = cleanedArea;
-    }
-
-    nextState.wilayah_lookup_source = "short_answer_free_wilayah_api";
-  } else {
-    // Fallback: tetap simpan jawaban customer sebagai area
-    // supaya [area] tidak kosong walau API wilayah gagal/ambigu.
-    nextState.kecamatan = currentState.kecamatan || "";
-    nextState.kota_kabupaten = currentState.kota_kabupaten || cleanedArea;
-  }
-
-  await saveCheckoutState(phone, session, nextState);
-
-  console.log("SHORT WILAYAH ANSWER SAVED:", nextState);
-
-  return nextState;
-}
-
-
-// === SAFE WILAYAH PLACEHOLDER KEYWORD PATCH ===
-function keywordHasWilayahPlaceholderSafe(keyword = "") {
-  const raw = String(keyword || "").toLowerCase();
-
-  return (
-    raw.includes("[kecamatan]") ||
-    raw.includes("[kota_kabupaten]") ||
-    raw.includes("[kabupaten]") ||
-    raw.includes("[kota]") ||
-    raw.includes("[provinsi]") ||
-    raw.includes("[kelurahan]") ||
-    raw.includes("[wilayah]")
-  );
-}
-
-function normalizeWilayahCompareSafe(value = "") {
-  return normalizeText(value)
-    .replace(/\b(kota|kabupaten|kab|kecamatan|kec|provinsi|kelurahan|kel|desa)\b/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function matchWilayahPlaceholderKeywordSafe(text = "", keyword = "", session = null) {
-  if (!keywordHasWilayahPlaceholderSafe(keyword)) return false;
-
-  const incoming = normalizeWilayahCompareSafe(text);
-
-  if (!incoming || incoming.length < 3) return false;
-
-  const state = getSessionCheckoutState(session);
-
-  const stateValues = [
-    state.area,
-    state.kecamatan,
-    state.kota_kabupaten,
-    state.provinsi,
-    state.kelurahan,
-    state.wilayah_user_answer,
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  const stateText = normalizeWilayahCompareSafe(stateValues);
-
-  if (
-    stateText &&
-    (
-      stateText.includes(incoming) ||
-      incoming.includes(stateText) ||
-      incoming.split(" ").some((word) => word.length >= 3 && stateText.includes(word))
-    )
-  ) {
-    return true;
-  }
-
-  // Fallback aman:
-  // Kalau bot baru tanya kec/kota dan customer jawab pendek seperti "malang" / "balikpapan",
-  // keyword [kecamatan] [kota_kabupaten] dianggap cocok tanpa perlu async lookup.
-  if (
-    typeof isBotAskingWilayahContext === "function" &&
-    typeof looksLikeShortWilayahAnswer === "function"
-  ) {
-    return isBotAskingWilayahContext(lastBotContextText) &&
-      looksLikeShortWilayahAnswer(text);
-  }
-
-  return false;
-}
-
 async function safeJsonFetch(url, options = {}) {
   const res = await fetch(url, options);
   const text = await res.text();
@@ -2940,19 +2131,6 @@ async function startBot() {
 
         console.log("JUMLAH TRIGGER:", triggers.length);
         console.log("SESSION AKTIF:", session);
-
-        let shortWilayahStateFromIncoming = null;
-
-        try {
-          shortWilayahStateFromIncoming = await saveShortWilayahAnswerIfNeeded(
-            phone,
-            session,
-            text,
-            lastBotContextText
-          );
-        } catch (err) {
-          console.log("SHORT WILAYAH SAVE ERROR:", err?.message);
-        }
         console.log("COD PATCH DEBUG:", {
           paymentChoice: typeof isPaymentChoiceQuestionPatch === "function"
             ? isPaymentChoiceQuestionPatch(text)
@@ -2990,16 +2168,8 @@ async function startBot() {
           const normalizedKeyword = normalizeText(keyword);
           if (!segment || !normalizedKeyword) return false;
 
-          if (keywordHasWilayahPlaceholderSafe(keyword)) {
-            return matchWilayahPlaceholderKeywordSafe(segment, keyword, session);
-          }
-
           if (keywordHasContextualRule(keyword)) {
             return contextualKeywordMatches(keyword, segment, lastBotContextText);
-          }
-
-          if (keywordHasOrderFormPlaceholder(keyword)) {
-            return matchOrderFormKeyword(text, keyword);
           }
 
           if (keywordHasAreaPlaceholder(keyword)) {
@@ -3146,26 +2316,12 @@ async function startBot() {
               return 0;
             }
 
-            if (keywordHasWilayahPlaceholderSafe(trigger.keyword)) {
-              return matchWilayahPlaceholderKeywordSafe(
-                normalizedSegment,
-                trigger.keyword,
-                session
-              )
-                ? 145
-                : 0;
-            }
-
             if (triggerRequiresLastBotContext(trigger)) {
               return contextualDashboardModeScore(
                 trigger,
                 normalizedSegment,
                 lastBotContextText
               );
-            }
-
-            if (keywordHasOrderFormPlaceholder(trigger.keyword)) {
-              return matchOrderFormKeyword(text, trigger.keyword) ? 140 : 0;
             }
 
             if (keywordHasContextualRule(trigger.keyword)) {
@@ -3319,15 +2475,7 @@ async function startBot() {
                 return false;
               }
 
-              if (keywordHasWilayahPlaceholderSafe(item.trigger.keyword)) {
-                return item.score >= 120;
-              }
-
               if (triggerRequiresLastBotContext(item.trigger)) {
-                return item.score >= 120;
-              }
-
-              if (keywordHasOrderFormPlaceholder(item.trigger.keyword)) {
                 return item.score >= 120;
               }
 
@@ -3463,10 +2611,6 @@ async function startBot() {
                 incomingText,
                 lastBotContextText
               );
-            }
-
-            if (keywordHasOrderFormPlaceholder(t.keyword)) {
-              return matchOrderFormKeyword(text, t.keyword);
             }
 
             if (keywordHasContextualRule(t.keyword)) {
@@ -3684,16 +2828,6 @@ async function startBot() {
         function getFinalTriggerOrderIndex(trigger) {
           const keyword = normalizeText(trigger.keyword);
 
-          if (keywordHasWilayahPlaceholderSafe(trigger.keyword)) {
-            return matchWilayahPlaceholderKeywordSafe(
-              incomingText,
-              trigger.keyword,
-              session
-            )
-              ? -1800
-              : Number.MAX_SAFE_INTEGER;
-          }
-
           if (triggerRequiresLastBotContext(trigger)) {
             return triggerMatchesDashboardContextMode(
               trigger,
@@ -3701,12 +2835,6 @@ async function startBot() {
               lastBotContextText
             )
               ? -2000
-              : Number.MAX_SAFE_INTEGER;
-          }
-
-          if (keywordHasOrderFormPlaceholder(trigger.keyword)) {
-            return matchOrderFormKeyword(text, trigger.keyword)
-              ? -1500
               : Number.MAX_SAFE_INTEGER;
           }
 
@@ -3793,73 +2921,27 @@ async function startBot() {
 
         console.log("TRIGGER FINAL:", foundList);
 
-        const currentSessionCheckoutState = {
-          ...getSessionCheckoutState(session),
-          ...(shortWilayahStateFromIncoming || {}),
-        };
-        let orderFormStateFromIncoming = currentSessionCheckoutState;
-
-        if (looksLikeOrderForm(text)) {
-          const checkoutForForm =
-            foundList
-              .map((item) => getFlowCheckout(flows, item.flow_id))
-              .find(Boolean) || null;
-
-          orderFormStateFromIncoming = extractOrderFormState(
-            text,
-            checkoutForForm,
-            currentSessionCheckoutState
-          );
-
-          orderFormStateFromIncoming = await enrichOrderStateWithFreeWilayah(
-            orderFormStateFromIncoming
-          );
-
-          await saveCheckoutState(phone, session, orderFormStateFromIncoming);
-
-          console.log("ORDER FORM TERSIMPAN:", orderFormStateFromIncoming);
-        } else if (isOrderConfirmationYes(text)) {
-          orderFormStateFromIncoming = {
-            ...currentSessionCheckoutState,
-            confirmation_status: "YA, KIRIM",
-            confirmed_at: new Date().toISOString(),
-          };
-
-          await saveCheckoutState(phone, session, orderFormStateFromIncoming);
-
-          console.log("ORDER CONFIRMED:", phone);
-        } else if (isOrderConfirmationRevision(text)) {
-          orderFormStateFromIncoming = {
-            ...currentSessionCheckoutState,
-            confirmation_status: "PERLU REVISI",
-            revised_at: new Date().toISOString(),
-          };
-
-          await saveCheckoutState(phone, session, orderFormStateFromIncoming);
-
-          console.log("ORDER REVISION REQUEST:", phone);
-        }
-
         for (const found of foundList) {
           const mediaList = getMediaList(found);
           const triggerCheckout = getFlowCheckout(flows, found.flow_id);
-          const previousCheckoutState = {
-            ...getSessionCheckoutState(session),
-            ...(shortWilayahStateFromIncoming || {}),
-            ...orderFormStateFromIncoming,
-          };
+          const previousCheckoutState = getSessionCheckoutState(session);
 
           const incomingQty = extractQty(text);
-          const incomingArea = triggerCheckout ? extractArea(text, triggerCheckout) : "";
+          const incomingLocation = triggerCheckout
+            ? extractLocationParts(text, triggerCheckout)
+            : extractLocationParts(text, null);
+          const incomingArea = incomingLocation.area || "";
           const incomingName = extractName(text);
-          const incomingAddress = looksLikeOrderForm(text)
-            ? previousCheckoutState.address || ""
-            : cleanAddressText(text);
+          const incomingAddress = cleanAddressText(text);
 
           const checkoutStateForTrigger = {
             ...previousCheckoutState,
             qty: incomingQty || Number(previousCheckoutState.qty) || 1,
             area: incomingArea || previousCheckoutState.area || "",
+            kecamatan: incomingLocation.kecamatan || previousCheckoutState.kecamatan || "",
+            kota_kabupaten: incomingLocation.kota_kabupaten || previousCheckoutState.kota_kabupaten || "",
+            kota: incomingLocation.kota || previousCheckoutState.kota || "",
+            kabupaten: incomingLocation.kabupaten || previousCheckoutState.kabupaten || "",
             address: incomingAddress || previousCheckoutState.address || "",
             name: incomingName || previousCheckoutState.name || "",
           };
