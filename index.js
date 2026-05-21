@@ -90,7 +90,6 @@ const ANSWER_SEPARATOR = "\n---JAWABAN_BARU---\n";
 // Dengan begitu saat deploy/update, WhatsApp tidak perlu scan ulang selama folder session aman.
 const SESSION_DIR = process.env.SESSION_DIR || "session";
 const AUTO_START_BOT = process.env.AUTO_START_BOT !== "false";
-let botEnabled = AUTO_START_BOT;
 
 function normalizeText(value) {
   return String(value || "")
@@ -2045,7 +2044,6 @@ function enqueueMessageProcess(phone, task) {
   return current;
 }
 
-
 function clearReconnectTimer() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -2068,18 +2066,12 @@ async function stopSocket() {
 
   sockInstance = null;
   isConnected = false;
-  isStarting = false;
 
   // Jangan hapus folder session di sini.
   // Stop socket hanya memutus proses sementara, bukan logout WA.
 }
 
 async function startBot() {
-  if (!botEnabled) {
-    console.log("BOT SEDANG NONAKTIF");
-    return;
-  }
-
   if (isStarting) return;
 
   isStarting = true;
@@ -2114,7 +2106,7 @@ async function startBot() {
       if (qr) {
         latestQR = await QRCode.toDataURL(qr);
         isConnected = false;
-        console.log("QR BERHASIL DIGENERATE CEPAT");
+        console.log("QR BERHASIL DIGENERATE");
       }
 
       if (connection === "open") {
@@ -2127,7 +2119,7 @@ async function startBot() {
         isConnected = false;
 
         const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-        const shouldReconnect = botEnabled && statusCode !== DisconnectReason.loggedOut;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
         console.log("KONEKSI PUTUS");
         console.log("STATUS CODE:", statusCode);
@@ -3145,7 +3137,6 @@ app.get("/status", (req, res) => {
   res.json({
     success: true,
     connected: isConnected,
-    enabled: botEnabled,
     hasQR: !!latestQR,
     starting: isStarting,
     sessionDir: SESSION_DIR,
@@ -3157,7 +3148,6 @@ app.get("/qr-json", (req, res) => {
     success: true,
     qr: latestQR,
     connected: isConnected,
-    enabled: botEnabled,
     hasQR: !!latestQR,
     starting: isStarting,
     sessionDir: SESSION_DIR,
@@ -3184,7 +3174,7 @@ app.get("/qr", (req, res) => {
     return res.send(`
       <html>
         <head>
-          <meta http-equiv="refresh" content="1">
+          <meta http-equiv="refresh" content="3">
         </head>
         <body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#07140f;color:white;font-family:sans-serif;text-align:center">
           <div>
@@ -3209,121 +3199,23 @@ app.get("/qr", (req, res) => {
   `);
 });
 
-
-app.get("/start", async (req, res) => {
-  try {
-    // START AMAN:
-    // Tidak hapus session dan tidak logout.
-    // Kalau session masih valid, langsung connected.
-    // Kalau session expired, QR baru akan muncul cepat.
-    botEnabled = true;
-    latestQR = null;
-    isConnected = false;
-    isStarting = false;
-
-    clearReconnectTimer();
-    await stopSocket();
-    startBot();
-
-    res.json({
-      success: true,
-      message: "WA Engine diaktifkan. QR akan muncul otomatis kalau session belum valid.",
-      connected: isConnected,
-      enabled: botEnabled,
-      hasQR: !!latestQR,
-      starting: isStarting,
-      sessionDir: SESSION_DIR,
-    });
-  } catch (err) {
-    console.log("START ERROR:", err?.message);
-
-    res.status(500).json({
-      success: false,
-      message: err?.message || "Gagal start WA Engine",
-    });
-  }
-});
-
-app.get("/stop", async (req, res) => {
-  try {
-    // STOP AMAN:
-    // Hanya mematikan socket sementara.
-    // Session tetap disimpan, jadi aktif lagi tidak perlu QR kalau session masih valid.
-    botEnabled = false;
-    latestQR = null;
-    isConnected = false;
-    isStarting = false;
-
-    clearReconnectTimer();
-    await stopSocket();
-
-    res.json({
-      success: true,
-      message: "WA Engine dinonaktifkan sementara. Session tidak dihapus.",
-      connected: false,
-      enabled: botEnabled,
-      hasQR: false,
-      sessionDir: SESSION_DIR,
-    });
-  } catch (err) {
-    console.log("STOP ERROR:", err?.message);
-
-    res.status(500).json({
-      success: false,
-      message: err?.message || "Gagal stop WA Engine",
-    });
-  }
-});
-
-app.get("/deactivate", async (req, res) => {
-  // Alias lama supaya tombol dashboard lama tetap aman.
-  try {
-    botEnabled = false;
-    latestQR = null;
-    isConnected = false;
-    isStarting = false;
-
-    clearReconnectTimer();
-    await stopSocket();
-
-    res.json({
-      success: true,
-      message: "WA Engine dinonaktifkan sementara. Session tidak dihapus.",
-      connected: false,
-      enabled: botEnabled,
-      hasQR: false,
-      sessionDir: SESSION_DIR,
-    });
-  } catch (err) {
-    console.log("DEACTIVATE ERROR:", err?.message);
-
-    res.status(500).json({
-      success: false,
-      message: err?.message || "Gagal nonaktifkan bot",
-    });
-  }
-});
-
 app.get("/connect", async (req, res) => {
   try {
     // SAFE CONNECT:
     // Tidak menghapus session, jadi aman dipakai setelah update/redeploy.
-    botEnabled = true;
     latestQR = null;
     isConnected = false;
     isStarting = false;
 
     clearReconnectTimer();
+
     await stopSocket();
+
     startBot();
 
     res.json({
       success: true,
       message: "WA Engine direstart aman tanpa menghapus session",
-      connected: isConnected,
-      enabled: botEnabled,
-      hasQR: !!latestQR,
-      starting: isStarting,
       sessionDir: SESSION_DIR,
     });
   } catch (err) {
@@ -3340,12 +3232,12 @@ app.get("/reset-session", async (req, res) => {
   try {
     // RESET SESSION:
     // Pakai ini hanya kalau memang mau logout total dan scan QR ulang.
-    botEnabled = true;
     latestQR = null;
     isConnected = false;
     isStarting = false;
 
     clearReconnectTimer();
+
     await stopSocket();
 
     await fs.promises.rm(SESSION_DIR, {
@@ -3358,9 +3250,6 @@ app.get("/reset-session", async (req, res) => {
     res.json({
       success: true,
       message: "Session lama dihapus, QR baru akan dibuat",
-      connected: isConnected,
-      enabled: botEnabled,
-      hasQR: !!latestQR,
       sessionDir: SESSION_DIR,
     });
   } catch (err) {
