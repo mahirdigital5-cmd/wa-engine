@@ -1032,6 +1032,7 @@ function matchAddressPlaceholderKeyword(text = "", keyword = "") {
 function extractQty(text) {
   const raw = String(text || "");
   const normalized = normalizeText(raw);
+  const words = normalized.split(" ").filter(Boolean);
 
   const quantityWords = [
     "pcs",
@@ -1046,8 +1047,11 @@ function extractQty(text) {
     "order",
     "ambil",
     "beli",
+    "buy",
     "mau",
     "paket",
+    "piece",
+    "pieces",
   ];
 
   const addressWords = [
@@ -1067,41 +1071,15 @@ function extractQty(text) {
     "provinsi",
     "patokan",
     "rumah",
+    "perum",
+    "komplek",
+    "kompleks",
   ];
-
-  const hasQuantityIntent = quantityWords.some((word) =>
-    normalized.includes(word)
-  );
-
-  const hasAddressIntent = addressWords.some((word) =>
-    normalized.split(" ").includes(word)
-  );
-
-  // Kalau chat terlihat seperti alamat dan tidak ada kata yang jelas menunjukkan jumlah,
-  // jangan ambil angka dari alamat seperti No. 54 / RT 29 / RW 05 sebagai qty.
-  if (hasAddressIntent && !hasQuantityIntent) {
-    return null;
-  }
-
-  // Ambil angka hanya kalau dekat dengan kata qty.
-  // Contoh: "2 pcs", "pcs 2", "ambil 3", "mau 2".
-  const quantityPatterns = [
-    /\b(\d{1,2})\s*(pcs|pc|biji|buah|unit|paket)\b/i,
-    /\b(qty|jumlah|pesan|pesen|order|ambil|beli|mau)\s*(\d{1,2})\b/i,
-    /\b(\d{1,2})\s*(qty|jumlah)\b/i,
-    /\b(\d{1,2})\s*(brp|berapa)\b/i,
-  ];
-
-  for (const pattern of quantityPatterns) {
-    const match = raw.match(pattern);
-    if (match) {
-      const value = Number(match[1] || match[2]);
-      if (value > 0 && value <= 99) return value;
-    }
-  }
 
   const wordMap = {
     satu: 1,
+    sebiji: 1,
+    sebuah: 1,
     dua: 2,
     tiga: 3,
     empat: 4,
@@ -1111,13 +1089,93 @@ function extractQty(text) {
     delapan: 8,
     sembilan: 9,
     sepuluh: 10,
+    sebelas: 11,
+    duabelas: 12,
+    "dua belas": 12,
   };
 
-  // Angka berbentuk kata hanya dipakai jika ada niat jumlah.
-  if (hasQuantityIntent) {
-    for (const [word, number] of Object.entries(wordMap)) {
-      if (normalized.split(" ").includes(word)) return number;
+  const hasQuantityIntent = quantityWords.some((word) =>
+    words.includes(word) || normalized.includes(` ${word} `)
+  );
+
+  const hasAddressIntent = addressWords.some((word) =>
+    words.includes(word)
+  );
+
+  // Kalau chat terlihat seperti alamat dan tidak ada niat jumlah,
+  // jangan ambil angka alamat seperti No. 54 / RT 29 / RW 05 sebagai qty.
+  if ((hasAddressIntent || looksLikeAddress(raw)) && !hasQuantityIntent) {
+    return null;
+  }
+
+  function validQty(value) {
+    const number = Number(value);
+    if (!Number.isInteger(number)) return null;
+    if (number <= 0 || number > 99) return null;
+    return number;
+  }
+
+  function wordToQty(value = "") {
+    const cleaned = normalizeText(value);
+    if (wordMap[cleaned]) return wordMap[cleaned];
+
+    const tokenList = cleaned.split(" ").filter(Boolean);
+    for (const token of tokenList) {
+      if (wordMap[token]) return wordMap[token];
     }
+
+    return null;
+  }
+
+  // Pola paling aman: angka dekat kata qty.
+  // Support:
+  // - "2 pcs", "3 biji", "4 unit"
+  // - "pcs 2", "qty 3"
+  // - "beli 2", "mau 3", "ambil 4", "order 5"
+  // - "beli dua", "mau tiga pcs"
+  const quantityPatterns = [
+    /\b(\d{1,2})\s*(pcs|pc|biji|buah|unit|paket|piece|pieces)\b/i,
+    /\b(pcs|pc|biji|buah|unit|paket|piece|pieces|qty|jumlah)\s*(\d{1,2})\b/i,
+    /\b(qty|jumlah|pesan|pesen|order|ambil|beli|buy|mau)\s*(?:nya\s*)?(\d{1,2})\b/i,
+    /\b(\d{1,2})\s*(qty|jumlah)\b/i,
+    /\b(\d{1,2})\s*(brp|berapa)\b/i,
+  ];
+
+  for (const pattern of quantityPatterns) {
+    const match = raw.match(pattern);
+    if (!match) continue;
+
+    const numberCandidate = match
+      .slice(1)
+      .find((item) => /^\d{1,2}$/.test(String(item || "")));
+
+    const qty = validQty(numberCandidate);
+    if (qty !== null) return qty;
+  }
+
+  const wordQuantityPatterns = [
+    /\b(qty|jumlah|pesan|pesen|order|ambil|beli|buy|mau)\s*(?:nya\s*)?(satu|sebiji|sebuah|dua|tiga|empat|lima|enam|tujuh|delapan|sembilan|sepuluh|sebelas|dua belas|duabelas)\b/i,
+    /\b(satu|sebiji|sebuah|dua|tiga|empat|lima|enam|tujuh|delapan|sembilan|sepuluh|sebelas|dua belas|duabelas)\s*(pcs|pc|biji|buah|unit|paket|piece|pieces)\b/i,
+  ];
+
+  for (const pattern of wordQuantityPatterns) {
+    const match = raw.match(pattern);
+    if (!match) continue;
+
+    const qty = wordToQty(match[2] || match[1]);
+    if (qty !== null) return qty;
+  }
+
+  // Fallback khusus: kalau ada niat jumlah, ambil angka kecil pertama
+  // yang bukan bagian dari alamat panjang.
+  // Contoh: "kalau beli 3 berapa kak" => 3.
+  if (hasQuantityIntent) {
+    const numberMatch = normalized.match(/\b\d{1,2}\b/);
+    const qty = validQty(numberMatch?.[0]);
+    if (qty !== null) return qty;
+
+    const wordQty = wordToQty(normalized);
+    if (wordQty !== null) return wordQty;
   }
 
   return null;
