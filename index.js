@@ -1591,6 +1591,213 @@ function shouldOnlyUsePaymentChoiceTriggers(incomingText = "", lastBotContext = 
   );
 }
 
+
+// === CONTEXTUAL KEYWORD PATCH ===
+function parseContextualKeyword(keyword = "") {
+  const raw = String(keyword || "").trim();
+
+  // Format:
+  // [pesan terakhir bot]
+  // jawaban customer
+  //
+  // Contoh:
+  // [mau cod atau transfer ?]
+  // cod
+  const match = raw.match(/^\s*\[([^\]]+)\]\s*([\s\S]*)$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const context = String(match[1] || "").trim();
+  const reply = String(match[2] || "").trim();
+
+  if (!context || !reply) {
+    return null;
+  }
+
+  return {
+    context,
+    reply,
+    normalizedContext: normalizeText(context),
+    normalizedReply: normalizeText(reply),
+  };
+}
+
+function keywordHasContextualRule(keyword = "") {
+  return parseContextualKeyword(keyword) !== null;
+}
+
+function normalizeContextComparable(value = "") {
+  return normalizeText(value)
+    .replace(/\bka\b/g, "kak")
+    .replace(/\bkaka\b/g, "kak")
+    .replace(/\btranfer\b/g, "transfer")
+    .replace(/\btrf\b/g, "transfer")
+    .replace(/\btf\b/g, "transfer")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function contextTextMatches(expected = "", actual = "") {
+  const expectedNorm = normalizeContextComparable(expected);
+  const actualNorm = normalizeContextComparable(actual);
+
+  if (!expectedNorm || !actualNorm) return false;
+
+  return (
+    actualNorm.includes(expectedNorm) ||
+    expectedNorm.includes(actualNorm)
+  );
+}
+
+function replyTextMatches(expected = "", actual = "") {
+  const expectedNorm = normalizeContextComparable(expected);
+  const actualNorm = normalizeContextComparable(actual);
+
+  if (!expectedNorm || !actualNorm) return false;
+
+  if (actualNorm === expectedNorm) return true;
+  if (actualNorm.includes(expectedNorm)) return true;
+
+  const expectedWords = expectedNorm.split(" ").filter(Boolean);
+  const actualWords = actualNorm.split(" ").filter(Boolean);
+
+  if (expectedWords.length === 1) {
+    return actualWords.includes(expectedWords[0]);
+  }
+
+  return expectedWords.every((word) => actualWords.includes(word));
+}
+
+function contextualKeywordMatches(keyword = "", incomingText = "", lastBotContext = "") {
+  const rule = parseContextualKeyword(keyword);
+
+  if (!rule) return false;
+
+  return (
+    contextTextMatches(rule.context, lastBotContext) &&
+    replyTextMatches(rule.reply, incomingText)
+  );
+}
+
+function contextualKeywordScore(keyword = "", incomingText = "", lastBotContext = "") {
+  return contextualKeywordMatches(keyword, incomingText, lastBotContext) ? 150 : 0;
+}
+
+function onlyContextualTriggersForCurrentReply(list = [], incomingText = "", lastBotContext = "") {
+  const matches = (list || []).filter((item) => {
+    return contextualKeywordMatches(item.keyword, incomingText, lastBotContext);
+  });
+
+  if (matches.length === 0) return [];
+
+  // Kalau ada beberapa yang cocok, pilih yang paling spesifik:
+  // context paling panjang + reply paling panjang.
+  matches.sort((a, b) => {
+    const ar = parseContextualKeyword(a.keyword);
+    const br = parseContextualKeyword(b.keyword);
+
+    const aScore =
+      normalizeText(ar?.context).length +
+      normalizeText(ar?.reply).length * 2;
+
+    const bScore =
+      normalizeText(br?.context).length +
+      normalizeText(br?.reply).length * 2;
+
+    return bScore - aScore;
+  });
+
+  return [matches[0]];
+}
+
+
+// === CONTEXT MODE FIELDS PATCH ===
+function parseContextMetaValue(value) {
+  const meta = parseJsonMaybe(value, {});
+  return meta && typeof meta === "object" ? meta : {};
+}
+
+function getTriggerContextMode(trigger = {}) {
+  const meta = parseContextMetaValue(trigger.context_meta);
+
+  return (
+    trigger.context_mode ||
+    meta.contextMode ||
+    meta.mode ||
+    "normal"
+  );
+}
+
+function getTriggerContextText(trigger = {}) {
+  const meta = parseContextMetaValue(trigger.context_meta);
+
+  return String(
+    trigger.context_text ||
+    meta.contextText ||
+    meta.context ||
+    ""
+  ).trim();
+}
+
+function triggerRequiresLastBotContext(trigger = {}) {
+  return getTriggerContextMode(trigger) === "last_bot_context";
+}
+
+function triggerContextMatchesLastBot(trigger = {}, lastBotContext = "") {
+  if (!triggerRequiresLastBotContext(trigger)) return true;
+
+  const expectedContext = getTriggerContextText(trigger);
+  if (!expectedContext) return false;
+
+  return contextTextMatches(expectedContext, lastBotContext);
+}
+
+function triggerKeywordWithoutBracketContext(trigger = {}) {
+  const parsed = parseContextualKeyword(trigger.keyword);
+  return parsed?.reply || trigger.keyword || "";
+}
+
+function triggerMatchesDashboardContextMode(trigger = {}, incomingText = "", lastBotContext = "") {
+  if (!triggerRequiresLastBotContext(trigger)) return false;
+
+  if (!triggerContextMatchesLastBot(trigger, lastBotContext)) return false;
+
+  return replyTextMatches(
+    triggerKeywordWithoutBracketContext(trigger),
+    incomingText
+  );
+}
+
+function contextualDashboardModeScore(trigger = {}, incomingText = "", lastBotContext = "") {
+  return triggerMatchesDashboardContextMode(trigger, incomingText, lastBotContext)
+    ? 160
+    : 0;
+}
+
+function onlyDashboardContextModeTriggersForCurrentReply(list = [], incomingText = "", lastBotContext = "") {
+  const matches = (list || []).filter((item) => {
+    return triggerMatchesDashboardContextMode(item, incomingText, lastBotContext);
+  });
+
+  if (matches.length === 0) return [];
+
+  matches.sort((a, b) => {
+    const aScore =
+      normalizeText(getTriggerContextText(a)).length +
+      normalizeText(triggerKeywordWithoutBracketContext(a)).length * 2;
+
+    const bScore =
+      normalizeText(getTriggerContextText(b)).length +
+      normalizeText(triggerKeywordWithoutBracketContext(b)).length * 2;
+
+    return bScore - aScore;
+  });
+
+  return [matches[0]];
+}
+
 async function safeJsonFetch(url, options = {}) {
   const res = await fetch(url, options);
   const text = await res.text();
@@ -1875,6 +2082,10 @@ async function startBot() {
           const normalizedKeyword = normalizeText(keyword);
           if (!segment || !normalizedKeyword) return false;
 
+          if (keywordHasContextualRule(keyword)) {
+            return contextualKeywordMatches(keyword, segment, lastBotContextText);
+          }
+
           if (keywordHasAreaPlaceholder(keyword)) {
             return matchAreaPlaceholderKeyword(segment, keyword, flows);
           }
@@ -2017,6 +2228,22 @@ async function startBot() {
               !isTransferChoiceAnswerPatch(normalizedSegment)
             ) {
               return 0;
+            }
+
+            if (triggerRequiresLastBotContext(trigger)) {
+              return contextualDashboardModeScore(
+                trigger,
+                normalizedSegment,
+                lastBotContextText
+              );
+            }
+
+            if (keywordHasContextualRule(trigger.keyword)) {
+              return contextualKeywordScore(
+                trigger.keyword,
+                normalizedSegment,
+                lastBotContextText
+              );
             }
 
             if (keywordHasAreaPlaceholder(trigger.keyword)) {
@@ -2162,6 +2389,14 @@ async function startBot() {
                 return false;
               }
 
+              if (triggerRequiresLastBotContext(item.trigger)) {
+                return item.score >= 120;
+              }
+
+              if (keywordHasContextualRule(item.trigger.keyword)) {
+                return item.score >= 120;
+              }
+
               // Ambang aman: kalau tidak cukup yakin, jangan kirim apa-apa.
               if (keywordHasAreaPlaceholder(item.trigger.keyword)) return item.score >= 80;
               if (keywordHasQtyPlaceholder(item.trigger.keyword)) return item.score >= 80;
@@ -2215,6 +2450,25 @@ async function startBot() {
 
         function matchFlowEntryTriggers(list) {
           const activeList = list.filter((t) => t.active);
+          const dashboardContextMatches = onlyDashboardContextModeTriggersForCurrentReply(
+            activeList,
+            incomingText,
+            lastBotContextText
+          );
+
+          if (dashboardContextMatches.length > 0) {
+            return dashboardContextMatches;
+          }
+
+          const contextualMatches = onlyContextualTriggersForCurrentReply(
+            activeList,
+            incomingText,
+            lastBotContextText
+          );
+
+          if (contextualMatches.length > 0) {
+            return contextualMatches;
+          }
 
           const exactMatches = activeList.filter((t) => {
             if (paymentChoiceReplyMode) {
@@ -2259,6 +2513,22 @@ async function startBot() {
 
             if (paymentChoiceReplyMode) {
               return isPaymentChoiceContextMatch(
+                t.keyword,
+                incomingText,
+                lastBotContextText
+              );
+            }
+
+            if (triggerRequiresLastBotContext(t)) {
+              return triggerMatchesDashboardContextMode(
+                t,
+                incomingText,
+                lastBotContextText
+              );
+            }
+
+            if (keywordHasContextualRule(t.keyword)) {
+              return contextualKeywordMatches(
                 t.keyword,
                 incomingText,
                 lastBotContextText
@@ -2328,11 +2598,39 @@ async function startBot() {
 
         let foundList = [];
 
+        const dashboardContextFoundList = onlyDashboardContextModeTriggersForCurrentReply(
+          triggers.filter((t) => t.active),
+          incomingText,
+          lastBotContextText
+        );
+
+        const contextualFoundList = dashboardContextFoundList.length > 0
+          ? dashboardContextFoundList
+          : onlyContextualTriggersForCurrentReply(
+              triggers.filter((t) => t.active),
+              incomingText,
+              lastBotContextText
+            );
+
+        if (contextualFoundList.length > 0) {
+          foundList = contextualFoundList;
+
+          console.log("CONTEXTUAL TRIGGER DITEMUKAN:", foundList);
+
+          const contextualFlowEntry = contextualFoundList[0];
+
+          if (contextualFlowEntry?.is_flow_entry === true && contextualFlowEntry?.flow_id) {
+            await updateSessionFlow(phone, contextualFlowEntry.flow_id);
+          }
+        }
+
         const flowEntryTriggers = triggers.filter(
           (t) => t.is_flow_entry === true
         );
 
-        const flowEntryFoundList = matchFlowEntryTriggers(flowEntryTriggers);
+        const flowEntryFoundList = foundList.length === 0
+          ? matchFlowEntryTriggers(flowEntryTriggers)
+          : [];
 
         if (flowEntryFoundList.length > 0) {
           foundList = flowEntryFoundList;
@@ -2409,6 +2707,26 @@ async function startBot() {
 
         foundList = uniqueTriggers(foundList);
 
+        const finalDashboardContextMatches = onlyDashboardContextModeTriggersForCurrentReply(
+          foundList,
+          incomingText,
+          lastBotContextText
+        );
+
+        if (finalDashboardContextMatches.length > 0) {
+          foundList = finalDashboardContextMatches;
+        }
+
+        const finalContextualMatches = onlyContextualTriggersForCurrentReply(
+          foundList,
+          incomingText,
+          lastBotContextText
+        );
+
+        if (finalContextualMatches.length > 0) {
+          foundList = finalContextualMatches;
+        }
+
         if (paymentChoiceReplyMode) {
           foundList = foundList.filter((item) =>
             isPaymentChoiceContextMatch(
@@ -2423,6 +2741,26 @@ async function startBot() {
 
         function getFinalTriggerOrderIndex(trigger) {
           const keyword = normalizeText(trigger.keyword);
+
+          if (triggerRequiresLastBotContext(trigger)) {
+            return triggerMatchesDashboardContextMode(
+              trigger,
+              incomingText,
+              lastBotContextText
+            )
+              ? -2000
+              : Number.MAX_SAFE_INTEGER;
+          }
+
+          if (keywordHasContextualRule(trigger.keyword)) {
+            return contextualKeywordMatches(
+              trigger.keyword,
+              incomingText,
+              lastBotContextText
+            )
+              ? -1000
+              : Number.MAX_SAFE_INTEGER;
+          }
 
           if (keywordHasAreaPlaceholder(trigger.keyword)) {
             for (let i = 0; i < incomingSegments.length; i++) {
