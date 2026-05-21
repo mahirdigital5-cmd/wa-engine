@@ -928,7 +928,18 @@ function getCheckoutVariables(checkout, state = {}) {
     total: formatRupiah(totals.total),
     harga: formatRupiah(totals.total),
     nama: state.name || "-",
+    no_hp: state.phone_number || "-",
+    nomor_wa: state.phone_number || "-",
+    nomor_alternatif: state.alternative_phone || "-",
     alamat: state.address || "-",
+    maps: state.maps || "-",
+    link_maps: state.maps || "-",
+    patokan: state.patokan || "-",
+    jam_terima: state.jam_terima || "-",
+    kurir: state.kurir || "-",
+    pembayaran: state.payment_method || "-",
+    metode_pembayaran: state.payment_method || "-",
+    status_konfirmasi: state.confirmation_status || "-",
     pesanan,
   };
 }
@@ -1798,6 +1809,188 @@ function onlyDashboardContextModeTriggersForCurrentReply(list = [], incomingText
   return [matches[0]];
 }
 
+
+// === ORDER FORM CONFIRMATION PATCH ===
+function extractFieldByLabels(text = "", labels = []) {
+  const raw = String(text || "");
+  const lines = raw.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+
+  for (const line of lines) {
+    for (const label of labels) {
+      const pattern = new RegExp(`^\\s*${label}\\s*[:=\\-]\\s*(.+)$`, "i");
+      const match = line.match(pattern);
+      if (match?.[1]) return match[1].trim();
+    }
+  }
+
+  for (const label of labels) {
+    const pattern = new RegExp(`${label}\\s*[:=\\-]\\s*([^\\n]+)`, "i");
+    const match = raw.match(pattern);
+    if (match?.[1]) return match[1].trim();
+  }
+
+  return "";
+}
+
+function extractPhoneNumber(text = "") {
+  const explicit = extractFieldByLabels(text, [
+    "no hp", "nomor hp", "no wa", "nomor wa", "whatsapp", "wa", "telp", "telepon"
+  ]);
+
+  if (explicit) return explicit;
+
+  const match = String(text || "").match(/(?:\+62|62|0)8[0-9\s\-]{7,16}/);
+  return match?.[0]?.replace(/\s+/g, " ").trim() || "";
+}
+
+function extractMapsLink(text = "") {
+  const raw = String(text || "");
+  const explicit = extractFieldByLabels(raw, [
+    "maps", "map", "google maps", "link maps", "shareloc", "share location", "lokasi"
+  ]);
+
+  if (explicit && /https?:\/\//i.test(explicit)) return explicit;
+
+  const match = raw.match(/https?:\/\/[^\s]+/i);
+  return match?.[0] || explicit || "";
+}
+
+function extractPatokan(text = "") {
+  return extractFieldByLabels(text, ["patokan", "patokan rumah", "dekat", "sebelah"]);
+}
+
+function extractJamTerima(text = "") {
+  return extractFieldByLabels(text, [
+    "jam bisa menerima", "jam terima", "jam menerima", "jam", "waktu terima"
+  ]);
+}
+
+function extractKurirPilihan(text = "") {
+  return extractFieldByLabels(text, ["kurir", "ekspedisi", "jasa kirim", "pengiriman"]);
+}
+
+function extractPaymentMethod(text = "") {
+  const explicit = extractFieldByLabels(text, [
+    "metode pembayaran", "pembayaran", "bayar", "payment"
+  ]);
+
+  if (explicit) return explicit;
+
+  const normalized = normalizeText(text);
+  if (normalized.includes("transfer") || normalized.includes("tranfer") || normalized.includes("tf")) return "Transfer";
+  if (normalized.includes("cod")) return "COD";
+
+  return "";
+}
+
+function extractOrderFormAddress(text = "") {
+  const explicit = extractFieldByLabels(text, [
+    "alamat", "alamat lengkap", "alamat penerima"
+  ]);
+
+  if (explicit) return explicit;
+
+  const lines = String(text || "").split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const addressLines = lines.filter((line) => {
+    const normalized = normalizeText(line);
+    return [
+      "jl", "jalan", "gang", "gg", "blok", "rt", "rw", "kelurahan", "desa",
+      "kecamatan", "kota", "kabupaten", "provinsi", "kode pos", "patokan"
+    ].some((word) => normalized.includes(normalizeText(word)));
+  });
+
+  return addressLines.join(", ");
+}
+
+function looksLikeOrderForm(text = "") {
+  const normalized = normalizeText(text);
+  const formSignals = [
+    "nama", "alamat", "no hp", "nomor hp", "no wa", "nomor wa", "whatsapp",
+    "patokan", "maps", "google maps", "kode pos", "kelurahan", "kecamatan", "rt", "rw"
+  ];
+
+  const count = formSignals.filter((signal) => normalized.includes(normalizeText(signal))).length;
+  return count >= 2 && normalized.length >= 20;
+}
+
+function keywordHasOrderFormPlaceholder(keyword = "") {
+  const raw = String(keyword || "").toLowerCase();
+  return (
+    raw.includes("[form]") ||
+    raw.includes("[order_form]") ||
+    raw.includes("[form_pemesanan]") ||
+    raw.includes("[konfirmasi_pesanan]")
+  );
+}
+
+function matchOrderFormKeyword(text = "", keyword = "") {
+  if (!keywordHasOrderFormPlaceholder(keyword)) return false;
+  return looksLikeOrderForm(text);
+}
+
+function extractOrderFormState(text = "", checkout = null, previousState = {}) {
+  const name =
+    extractName(text) ||
+    extractFieldByLabels(text, [
+      "nama", "nama lengkap", "nama penerima", "penerima", "atas nama"
+    ]);
+
+  const phoneNumber = extractPhoneNumber(text);
+  const alternativePhone = extractFieldByLabels(text, [
+    "nomor alternatif", "no alternatif", "no hp alternatif", "wa alternatif", "nomor cadangan"
+  ]);
+
+  const address = extractOrderFormAddress(text);
+  const maps = extractMapsLink(text);
+  const patokan = extractPatokan(text);
+  const jamTerima = extractJamTerima(text);
+  const kurir = extractKurirPilihan(text);
+  const paymentMethod = extractPaymentMethod(text);
+  const qty = extractQty(text);
+  const area = checkout ? extractArea(text, checkout) : "";
+
+  return {
+    ...previousState,
+    name: name || previousState.name || "",
+    phone_number: phoneNumber || previousState.phone_number || "",
+    alternative_phone: alternativePhone || previousState.alternative_phone || "",
+    address: address || previousState.address || "",
+    maps: maps || previousState.maps || "",
+    patokan: patokan || previousState.patokan || "",
+    jam_terima: jamTerima || previousState.jam_terima || "",
+    kurir: kurir || previousState.kurir || "",
+    payment_method: paymentMethod || previousState.payment_method || "",
+    qty: qty || Number(previousState.qty) || 1,
+    area: area || previousState.area || "",
+    form_received: looksLikeOrderForm(text) || previousState.form_received === true,
+    confirmation_status: previousState.confirmation_status || "menunggu_konfirmasi",
+  };
+}
+
+function isOrderConfirmationYes(text = "") {
+  const normalized = normalizeText(text);
+  return (
+    normalized === "ya kirim" ||
+    normalized === "yakirim" ||
+    normalized === "ya dikirim" ||
+    normalized === "iya kirim" ||
+    normalized === "yes kirim" ||
+    normalized.includes("ya kirim") ||
+    normalized.includes("iya kirim")
+  );
+}
+
+function isOrderConfirmationRevision(text = "") {
+  const normalized = normalizeText(text);
+  return (
+    normalized.includes("revisi") ||
+    normalized.includes("ubah") ||
+    normalized.includes("ganti") ||
+    normalized.includes("salah") ||
+    normalized.includes("alamatnya")
+  );
+}
+
 async function safeJsonFetch(url, options = {}) {
   const res = await fetch(url, options);
   const text = await res.text();
@@ -2086,6 +2279,10 @@ async function startBot() {
             return contextualKeywordMatches(keyword, segment, lastBotContextText);
           }
 
+          if (keywordHasOrderFormPlaceholder(keyword)) {
+            return matchOrderFormKeyword(text, keyword);
+          }
+
           if (keywordHasAreaPlaceholder(keyword)) {
             return matchAreaPlaceholderKeyword(segment, keyword, flows);
           }
@@ -2236,6 +2433,10 @@ async function startBot() {
                 normalizedSegment,
                 lastBotContextText
               );
+            }
+
+            if (keywordHasOrderFormPlaceholder(trigger.keyword)) {
+              return matchOrderFormKeyword(text, trigger.keyword) ? 140 : 0;
             }
 
             if (keywordHasContextualRule(trigger.keyword)) {
@@ -2393,6 +2594,10 @@ async function startBot() {
                 return item.score >= 120;
               }
 
+              if (keywordHasOrderFormPlaceholder(item.trigger.keyword)) {
+                return item.score >= 120;
+              }
+
               if (keywordHasContextualRule(item.trigger.keyword)) {
                 return item.score >= 120;
               }
@@ -2525,6 +2730,10 @@ async function startBot() {
                 incomingText,
                 lastBotContextText
               );
+            }
+
+            if (keywordHasOrderFormPlaceholder(t.keyword)) {
+              return matchOrderFormKeyword(text, t.keyword);
             }
 
             if (keywordHasContextualRule(t.keyword)) {
@@ -2752,6 +2961,12 @@ async function startBot() {
               : Number.MAX_SAFE_INTEGER;
           }
 
+          if (keywordHasOrderFormPlaceholder(trigger.keyword)) {
+            return matchOrderFormKeyword(text, trigger.keyword)
+              ? -1500
+              : Number.MAX_SAFE_INTEGER;
+          }
+
           if (keywordHasContextualRule(trigger.keyword)) {
             return contextualKeywordMatches(
               trigger.keyword,
@@ -2835,15 +3050,60 @@ async function startBot() {
 
         console.log("TRIGGER FINAL:", foundList);
 
+        const currentSessionCheckoutState = getSessionCheckoutState(session);
+        let orderFormStateFromIncoming = currentSessionCheckoutState;
+
+        if (looksLikeOrderForm(text)) {
+          const checkoutForForm =
+            foundList
+              .map((item) => getFlowCheckout(flows, item.flow_id))
+              .find(Boolean) || null;
+
+          orderFormStateFromIncoming = extractOrderFormState(
+            text,
+            checkoutForForm,
+            currentSessionCheckoutState
+          );
+
+          await saveCheckoutState(phone, session, orderFormStateFromIncoming);
+
+          console.log("ORDER FORM TERSIMPAN:", orderFormStateFromIncoming);
+        } else if (isOrderConfirmationYes(text)) {
+          orderFormStateFromIncoming = {
+            ...currentSessionCheckoutState,
+            confirmation_status: "YA, KIRIM",
+            confirmed_at: new Date().toISOString(),
+          };
+
+          await saveCheckoutState(phone, session, orderFormStateFromIncoming);
+
+          console.log("ORDER CONFIRMED:", phone);
+        } else if (isOrderConfirmationRevision(text)) {
+          orderFormStateFromIncoming = {
+            ...currentSessionCheckoutState,
+            confirmation_status: "PERLU REVISI",
+            revised_at: new Date().toISOString(),
+          };
+
+          await saveCheckoutState(phone, session, orderFormStateFromIncoming);
+
+          console.log("ORDER REVISION REQUEST:", phone);
+        }
+
         for (const found of foundList) {
           const mediaList = getMediaList(found);
           const triggerCheckout = getFlowCheckout(flows, found.flow_id);
-          const previousCheckoutState = getSessionCheckoutState(session);
+          const previousCheckoutState = {
+            ...getSessionCheckoutState(session),
+            ...orderFormStateFromIncoming,
+          };
 
           const incomingQty = extractQty(text);
           const incomingArea = triggerCheckout ? extractArea(text, triggerCheckout) : "";
           const incomingName = extractName(text);
-          const incomingAddress = cleanAddressText(text);
+          const incomingAddress = looksLikeOrderForm(text)
+            ? previousCheckoutState.address || ""
+            : cleanAddressText(text);
 
           const checkoutStateForTrigger = {
             ...previousCheckoutState,
