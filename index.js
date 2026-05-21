@@ -315,6 +315,17 @@ function titleCaseLocation(value = "") {
     .join(" ");
 }
 
+
+// === LOCATION CLEAN PATCH ===
+// Membersihkan sapaan customer dari jawaban lokasi pendek.
+// Contoh: "balikpapan ka" -> "balikpapan", "samarinda kak" -> "samarinda".
+function cleanLocationReplyText(value = "") {
+  return normalizeLocationText(value)
+    .replace(/\b(kak|ka|kaka|min|admin|gan|sis|mas|mba|mbak|bang|bos|ya|yah|dong)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function splitKnownAreaToLocationParts(area = "") {
   const normalized = normalizeLocationText(area);
   const words = normalized.split(" ").filter(Boolean);
@@ -399,11 +410,13 @@ function extractLocationParts(text = "", checkout = null) {
   // Fallback super aman: kalau teks pendek dan terlihat seperti nama lokasi,
   // gunakan teks itu sebagai area/kecamatan. Contoh: "balikpapan", "bandung", "malang".
   if (isLikelyShortLocationReply(normalized)) {
+    const cleanedLocation = cleanLocationReplyText(normalized);
+
     return {
-      area: titleCaseLocation(normalized),
-      kecamatan: titleCaseLocation(normalized),
-      kota_kabupaten: titleCaseLocation(normalized),
-      kota: titleCaseLocation(normalized),
+      area: titleCaseLocation(cleanedLocation),
+      kecamatan: titleCaseLocation(cleanedLocation),
+      kota_kabupaten: titleCaseLocation(cleanedLocation),
+      kota: titleCaseLocation(cleanedLocation),
       kabupaten: "",
     };
   }
@@ -579,10 +592,7 @@ function isBotLocationQuestion(text = "") {
 }
 
 function isLikelyShortLocationReply(text = "") {
-  const normalized = normalizeLocationText(text)
-    .replace(/\b(kak|ka|min|admin|gan|sis|mas|mba|mbak|bang|bos|ya|yah|dong)\b/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  const normalized = cleanLocationReplyText(text);
 
   if (!normalized) return false;
 
@@ -1151,6 +1161,32 @@ function extractQty(text) {
 
     const qty = validQty(numberCandidate);
     if (qty !== null) return qty;
+  }
+
+  // Patch pertanyaan harga berbasis qty tanpa kata "beli".
+  // Support:
+  // - "3 berapa kak"
+  // - "kalo 3 brpa ka"
+  // - "kalau beli 3 berapa"
+  // - "jika ambil 4 berapanya"
+  // Pakai normalized supaya typo brp/brpa/brapa tetap jadi "berapa".
+  const normalizedQtyPricePatterns = [
+    /\b(\d{1,2})\s*(berapa|berapanya)\b/i,
+    /\b(kalo|kalau|jika|kalau\s+mau|kalo\s+mau)\s*(?:beli|ambil|pesan|pesen|order|mau)?\s*(\d{1,2})\b/i,
+  ];
+
+  if (!looksLikeAddress(raw)) {
+    for (const pattern of normalizedQtyPricePatterns) {
+      const match = normalized.match(pattern);
+      if (!match) continue;
+
+      const numberCandidate = match
+        .slice(1)
+        .find((item) => /^\d{1,2}$/.test(String(item || "")));
+
+      const qty = validQty(numberCandidate);
+      if (qty !== null) return qty;
+    }
   }
 
   const wordQuantityPatterns = [
