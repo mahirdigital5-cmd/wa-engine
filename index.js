@@ -920,7 +920,12 @@ function getCheckoutTotal(checkout, qty, area) {
 
 function getCheckoutVariables(checkout, state = {}) {
   const qty = Number(state.qty) || 1;
-  const area = state.area || "";
+  const area =
+    state.area ||
+    state.kecamatan ||
+    state.kota_kabupaten ||
+    state.wilayah_user_answer ||
+    "";
   const totals = getCheckoutTotal(checkout, qty, area);
   const pesanan = `${checkout.productName} ${qty} pcs`;
   const structuredAddress = structureAddress(state.address || "");
@@ -956,6 +961,7 @@ function getCheckoutVariables(checkout, state = {}) {
     pembayaran: state.payment_method || "-",
     metode_pembayaran: state.payment_method || "-",
     status_konfirmasi: state.confirmation_status || "-",
+    wilayah_jawaban: state.wilayah_user_answer || "-",
     pesanan,
   };
 }
@@ -2465,6 +2471,158 @@ async function enrichOrderStateWithFreeWilayah(state = {}) {
   };
 }
 
+
+// === SHORT WILAYAH ANSWER PATCH ===
+function isBotAskingWilayahContext(text = "") {
+  const normalized = normalizeText(text);
+
+  const hasWilayahWord =
+    normalized.includes("kec") ||
+    normalized.includes("kecamatan") ||
+    normalized.includes("kota") ||
+    normalized.includes("kabupaten") ||
+    normalized.includes("kab") ||
+    normalized.includes("provinsi") ||
+    normalized.includes("daerah") ||
+    normalized.includes("wilayah") ||
+    normalized.includes("alamat");
+
+  const hasQuestionIntent =
+    normalized.includes("mana") ||
+    normalized.includes("dimana") ||
+    normalized.includes("di mana") ||
+    normalized.includes("isi") ||
+    normalized.includes("sebutkan") ||
+    normalized.includes("kirim") ||
+    normalized.includes("ketik") ||
+    normalized.includes("lokasi");
+
+  return hasWilayahWord && hasQuestionIntent;
+}
+
+function looksLikeShortWilayahAnswer(text = "") {
+  const raw = String(text || "").trim();
+  const normalized = normalizeText(raw);
+  const words = normalized.split(" ").filter(Boolean);
+
+  if (!normalized) return false;
+  if (normalized.length < 3) return false;
+  if (words.length > 6) return false;
+
+  const blockedWords = [
+    "harga",
+    "berapa",
+    "cod",
+    "transfer",
+    "tf",
+    "ongkir",
+    "pesan",
+    "ambil",
+    "beli",
+    "mau",
+    "pcs",
+    "alamat",
+    "nama",
+    "no",
+    "nomor",
+  ];
+
+  if (blockedWords.some((word) => words.includes(word))) {
+    return false;
+  }
+
+  return /[a-zA-Z]/.test(raw);
+}
+
+function buildWilayahLookupCandidates(text = "") {
+  const raw = String(text || "").trim();
+  const normalized = normalizeText(raw);
+
+  const splitParts = raw
+    .split(/[\/,|]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  const candidates = [
+    raw,
+    normalized,
+    ...splitParts,
+    ...splitParts.map((item) => normalizeText(item)),
+  ]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+
+  return [...new Set(candidates)];
+}
+
+function cleanWilayahAnswerArea(text = "") {
+  const normalized = normalizeText(text)
+    .replace(/\b(kec|kecamatan|kota|kab|kabupaten|provinsi|daerah)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return normalized || normalizeText(text);
+}
+
+async function lookupShortWilayahAnswer(text = "") {
+  const candidates = buildWilayahLookupCandidates(text);
+
+  for (const candidate of candidates) {
+    const result = await lookupAddressWithFreeWilayah(candidate);
+
+    if (result) {
+      return result;
+    }
+  }
+
+  return null;
+}
+
+async function saveShortWilayahAnswerIfNeeded(phone, session, text = "", lastBotContextText = "") {
+  if (!isBotAskingWilayahContext(lastBotContextText)) return null;
+  if (!looksLikeShortWilayahAnswer(text)) return null;
+
+  const currentState = getSessionCheckoutState(session);
+  const wilayah = await lookupShortWilayahAnswer(text);
+  const cleanedArea = cleanWilayahAnswerArea(text);
+
+  const nextState = {
+    ...currentState,
+    area: currentState.area || cleanedArea,
+    wilayah_user_answer: String(text || "").trim(),
+    wilayah_context_answered_at: new Date().toISOString(),
+  };
+
+  if (wilayah) {
+    nextState.provinsi = wilayah.provinsi || currentState.provinsi || "";
+    nextState.kota_kabupaten =
+      wilayah.kota_kabupaten || currentState.kota_kabupaten || "";
+    nextState.kecamatan = wilayah.kecamatan || currentState.kecamatan || "";
+    nextState.kelurahan = wilayah.kelurahan || currentState.kelurahan || "";
+
+    if (wilayah.kecamatan) {
+      nextState.area = wilayah.kecamatan;
+    } else if (wilayah.kota_kabupaten) {
+      nextState.area = wilayah.kota_kabupaten;
+    } else {
+      nextState.area = cleanedArea;
+    }
+
+    nextState.wilayah_lookup_source = "short_answer_free_wilayah_api";
+  } else {
+    // Fallback: tetap simpan jawaban customer sebagai area
+    // supaya [area] tidak kosong walau API wilayah gagal/ambigu.
+    nextState.kecamatan = currentState.kecamatan || "";
+    nextState.kota_kabupaten = currentState.kota_kabupaten || cleanedArea;
+  }
+
+  await saveCheckoutState(phone, session, nextState);
+
+  console.log("SHORT WILAYAH ANSWER SAVED:", nextState);
+
+  return nextState;
+}
+
 async function safeJsonFetch(url, options = {}) {
   const res = await fetch(url, options);
   const text = await res.text();
@@ -2712,6 +2870,19 @@ async function startBot() {
 
         console.log("JUMLAH TRIGGER:", triggers.length);
         console.log("SESSION AKTIF:", session);
+
+        let shortWilayahStateFromIncoming = null;
+
+        try {
+          shortWilayahStateFromIncoming = await saveShortWilayahAnswerIfNeeded(
+            phone,
+            session,
+            text,
+            lastBotContextText
+          );
+        } catch (err) {
+          console.log("SHORT WILAYAH SAVE ERROR:", err?.message);
+        }
         console.log("COD PATCH DEBUG:", {
           paymentChoice: typeof isPaymentChoiceQuestionPatch === "function"
             ? isPaymentChoiceQuestionPatch(text)
@@ -3524,7 +3695,10 @@ async function startBot() {
 
         console.log("TRIGGER FINAL:", foundList);
 
-        const currentSessionCheckoutState = getSessionCheckoutState(session);
+        const currentSessionCheckoutState = {
+          ...getSessionCheckoutState(session),
+          ...(shortWilayahStateFromIncoming || {}),
+        };
         let orderFormStateFromIncoming = currentSessionCheckoutState;
 
         if (looksLikeOrderForm(text)) {
@@ -3573,6 +3747,7 @@ async function startBot() {
           const triggerCheckout = getFlowCheckout(flows, found.flow_id);
           const previousCheckoutState = {
             ...getSessionCheckoutState(session),
+            ...(shortWilayahStateFromIncoming || {}),
             ...orderFormStateFromIncoming,
           };
 
