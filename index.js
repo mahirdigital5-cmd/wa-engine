@@ -1,3 +1,4 @@
+import fs from "fs";
 import express from "express";
 import makeWASocket, {
   DisconnectReason,
@@ -2623,8 +2624,8 @@ async function saveShortWilayahAnswerIfNeeded(phone, session, text = "", lastBot
 }
 
 
-// === WILAYAH PLACEHOLDER KEYWORD PATCH ===
-function keywordHasWilayahPlaceholder(keyword = "") {
+// === SAFE WILAYAH PLACEHOLDER KEYWORD PATCH ===
+function keywordHasWilayahPlaceholderSafe(keyword = "") {
   const raw = String(keyword || "").toLowerCase();
 
   return (
@@ -2638,108 +2639,58 @@ function keywordHasWilayahPlaceholder(keyword = "") {
   );
 }
 
-function getWilayahValueFromStateByKeyword(keyword = "", state = {}) {
-  const raw = String(keyword || "").toLowerCase();
-
-  const values = [];
-
-  if (raw.includes("[kecamatan]") && state.kecamatan) {
-    values.push(state.kecamatan);
-  }
-
-  if (raw.includes("[kota_kabupaten]") && state.kota_kabupaten) {
-    values.push(state.kota_kabupaten);
-  }
-
-  if (raw.includes("[kabupaten]") && state.kota_kabupaten) {
-    values.push(state.kota_kabupaten);
-  }
-
-  if (raw.includes("[kota]") && state.kota_kabupaten) {
-    values.push(state.kota_kabupaten);
-  }
-
-  if (raw.includes("[provinsi]") && state.provinsi) {
-    values.push(state.provinsi);
-  }
-
-  if (raw.includes("[kelurahan]") && state.kelurahan) {
-    values.push(state.kelurahan);
-  }
-
-  if (raw.includes("[wilayah]") && state.area) {
-    values.push(state.area);
-  }
-
-  if (values.length === 0 && state.wilayah_user_answer) {
-    values.push(state.wilayah_user_answer);
-  }
-
-  if (values.length === 0 && state.area) {
-    values.push(state.area);
-  }
-
-  return values.filter(Boolean).join(" ");
-}
-
-function cleanWilayahTextForCompare(value = "") {
+function normalizeWilayahCompareSafe(value = "") {
   return normalizeText(value)
     .replace(/\b(kota|kabupaten|kab|kecamatan|kec|provinsi|kelurahan|kel|desa)\b/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-async function matchWilayahPlaceholderKeyword(text = "", keyword = "", session = null) {
-  if (!keywordHasWilayahPlaceholder(keyword)) return false;
+function matchWilayahPlaceholderKeywordSafe(text = "", keyword = "", session = null) {
+  if (!keywordHasWilayahPlaceholderSafe(keyword)) return false;
 
-  const currentState = getSessionCheckoutState(session);
-  const normalizedText = cleanWilayahTextForCompare(text);
+  const incoming = normalizeWilayahCompareSafe(text);
 
-  if (!normalizedText) return false;
+  if (!incoming || incoming.length < 3) return false;
 
-  // Kalau sebelumnya sudah sempat disimpan ke session, cocokkan dari session dulu.
-  const stateValue = getWilayahValueFromStateByKeyword(keyword, currentState);
-  const normalizedStateValue = cleanWilayahTextForCompare(stateValue);
+  const state = getSessionCheckoutState(session);
+
+  const stateValues = [
+    state.area,
+    state.kecamatan,
+    state.kota_kabupaten,
+    state.provinsi,
+    state.kelurahan,
+    state.wilayah_user_answer,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const stateText = normalizeWilayahCompareSafe(stateValues);
 
   if (
-    normalizedStateValue &&
+    stateText &&
     (
-      normalizedStateValue.includes(normalizedText) ||
-      normalizedText.includes(normalizedStateValue)
+      stateText.includes(incoming) ||
+      incoming.includes(stateText) ||
+      incoming.split(" ").some((word) => word.length >= 3 && stateText.includes(word))
     )
   ) {
     return true;
   }
 
-  // Kalau customer baru jawab kota/kecamatan pendek, coba lookup wilayah gratis.
-  const wilayah = await lookupShortWilayahAnswer(text);
-
-  if (wilayah) {
-    const values = [
-      wilayah.kelurahan,
-      wilayah.kecamatan,
-      wilayah.kota_kabupaten,
-      wilayah.provinsi,
-    ]
-      .filter(Boolean)
-      .join(" ");
-
-    const normalizedWilayah = cleanWilayahTextForCompare(values);
-
-    if (
-      normalizedWilayah.includes(normalizedText) ||
-      normalizedText.includes(normalizedWilayah) ||
-      normalizedText
-        .split(" ")
-        .some((word) => word.length >= 3 && normalizedWilayah.includes(word))
-    ) {
-      return true;
-    }
+  // Fallback aman:
+  // Kalau bot baru tanya kec/kota dan customer jawab pendek seperti "malang" / "balikpapan",
+  // keyword [kecamatan] [kota_kabupaten] dianggap cocok tanpa perlu async lookup.
+  if (
+    typeof isBotAskingWilayahContext === "function" &&
+    typeof looksLikeShortWilayahAnswer === "function"
+  ) {
+    return isBotAskingWilayahContext(lastBotContextText) &&
+      looksLikeShortWilayahAnswer(text);
   }
 
-  // Fallback: kalau keyword memang placeholder wilayah,
-  // jawaban pendek seperti "balikpapan" / "malang" tetap dianggap cocok.
-  return looksLikeShortWilayahAnswer(text);
+  return false;
 }
 
 async function safeJsonFetch(url, options = {}) {
@@ -3035,12 +2986,12 @@ async function startBot() {
 
         const incomingSegments = splitIncomingSegments(text);
 
-        async function segmentMatchesKeyword(segment, keyword) {
+        function segmentMatchesKeyword(segment, keyword) {
           const normalizedKeyword = normalizeText(keyword);
           if (!segment || !normalizedKeyword) return false;
 
-          if (keywordHasWilayahPlaceholder(keyword)) {
-            return await matchWilayahPlaceholderKeyword(segment, keyword, session);
+          if (keywordHasWilayahPlaceholderSafe(keyword)) {
+            return matchWilayahPlaceholderKeywordSafe(segment, keyword, session);
           }
 
           if (keywordHasContextualRule(keyword)) {
@@ -3062,7 +3013,7 @@ async function startBot() {
           return segment.includes(normalizedKeyword);
         }
 
-        async function matchTriggers(list) {
+        function matchTriggers(list) {
           const activeList = list.filter((t) => t.active);
 
           const ignoredWords = [
@@ -3132,7 +3083,7 @@ async function startBot() {
             return areas.some((area) => normalized.includes(area));
           }
 
-          async function getTriggerScore(trigger, segment = incomingText) {
+          function getTriggerScore(trigger, segment = incomingText) {
             const keyword = normalizeText(trigger.keyword);
             const normalizedSegment = normalizeText(segment);
 
@@ -3195,14 +3146,14 @@ async function startBot() {
               return 0;
             }
 
-            if (keywordHasWilayahPlaceholder(trigger.keyword)) {
-              const wilayahMatched = await matchWilayahPlaceholderKeyword(
+            if (keywordHasWilayahPlaceholderSafe(trigger.keyword)) {
+              return matchWilayahPlaceholderKeywordSafe(
                 normalizedSegment,
                 trigger.keyword,
                 session
-              );
-
-              return wilayahMatched ? 145 : 0;
+              )
+                ? 145
+                : 0;
             }
 
             if (triggerRequiresLastBotContext(trigger)) {
@@ -3313,17 +3264,13 @@ async function startBot() {
             return Math.max(score, 0);
           }
 
-          async function getBestSegmentScore(trigger) {
-            const segmentScores = [];
+          function getBestSegmentScore(trigger) {
+            const segmentScores = incomingSegments.map((segment, index) => ({
+              index,
+              score: getTriggerScore(trigger, segment),
+            }));
 
-            for (let index = 0; index < incomingSegments.length; index++) {
-              segmentScores.push({
-                index,
-                score: await getTriggerScore(trigger, incomingSegments[index]),
-              });
-            }
-
-            const fullScore = await getTriggerScore(trigger, incomingText);
+            const fullScore = getTriggerScore(trigger, incomingText);
 
             let best = {
               index: Number.MAX_SAFE_INTEGER,
@@ -3339,7 +3286,7 @@ async function startBot() {
             // Riwayat 10 chat terakhir hanya untuk bantu konteks ringan.
             // Tidak boleh membuat trigger keluar kalau chat saat ini skornya lemah.
             const contextScore = recentContextText
-              ? await getTriggerScore(trigger, incomingTextWithContext)
+              ? getTriggerScore(trigger, incomingTextWithContext)
               : 0;
 
             if (best.score >= 55 && contextScore > best.score) {
@@ -3349,19 +3296,16 @@ async function startBot() {
             return best;
           }
 
-          const scoredRaw = [];
+          const scored = activeList
+            .map((trigger) => {
+              const best = getBestSegmentScore(trigger);
 
-          for (const trigger of activeList) {
-            const best = await getBestSegmentScore(trigger);
-
-            scoredRaw.push({
-              trigger,
-              score: best.score,
-              orderIndex: best.index,
-            });
-          }
-
-          const scored = scoredRaw
+              return {
+                trigger,
+                score: best.score,
+                orderIndex: best.index,
+              };
+            })
             .filter((item) => {
               const keyword = normalizeText(item.trigger.keyword);
 
@@ -3375,7 +3319,7 @@ async function startBot() {
                 return false;
               }
 
-              if (keywordHasWilayahPlaceholder(item.trigger.keyword)) {
+              if (keywordHasWilayahPlaceholderSafe(item.trigger.keyword)) {
                 return item.score >= 120;
               }
 
@@ -3442,7 +3386,7 @@ async function startBot() {
           return uniqueTriggers(scored.map((item) => item.trigger));
         }
 
-        async function matchFlowEntryTriggers(list) {
+        function matchFlowEntryTriggers(list) {
           const activeList = list.filter((t) => t.active);
           const dashboardContextMatches = onlyDashboardContextModeTriggersForCurrentReply(
             activeList,
@@ -3627,7 +3571,7 @@ async function startBot() {
         );
 
         const flowEntryFoundList = foundList.length === 0
-          ? await matchFlowEntryTriggers(flowEntryTriggers)
+          ? matchFlowEntryTriggers(flowEntryTriggers)
           : [];
 
         if (flowEntryFoundList.length > 0) {
@@ -3740,8 +3684,12 @@ async function startBot() {
         function getFinalTriggerOrderIndex(trigger) {
           const keyword = normalizeText(trigger.keyword);
 
-          if (keywordHasWilayahPlaceholder(trigger.keyword)) {
-            return looksLikeShortWilayahAnswer(incomingText)
+          if (keywordHasWilayahPlaceholderSafe(trigger.keyword)) {
+            return matchWilayahPlaceholderKeywordSafe(
+              incomingText,
+              trigger.keyword,
+              session
+            )
               ? -1800
               : Number.MAX_SAFE_INTEGER;
           }
