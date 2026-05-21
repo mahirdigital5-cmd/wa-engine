@@ -29,10 +29,6 @@ app.use((req, res, next) => {
 
 let sockInstance = null;
 let latestQR = null;
-let latestPairingCode = null;
-let pairingPhoneNumber = process.env.PAIRING_PHONE_NUMBER || "";
-let pairingRequestedAt = null;
-let pairingMessage = "";
 let isConnected = false;
 let isStarting = false;
 let reconnectTimer = null;
@@ -2050,59 +2046,6 @@ function enqueueMessageProcess(phone, task) {
 }
 
 
-function normalizePairingPhone(value = "") {
-  let digits = String(value || "").replace(/\D/g, "");
-
-  // Format lokal Indonesia: 08xxx -> 628xxx
-  if (digits.startsWith("0")) {
-    digits = "62" + digits.slice(1);
-  }
-
-  return digits;
-}
-
-function isValidPairingPhone(value = "") {
-  const phone = normalizePairingPhone(value);
-  return phone.length >= 10 && phone.length <= 15;
-}
-
-function formatPairingCode(value = "") {
-  const clean = String(value || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-  return clean.match(/.{1,4}/g)?.join("-") || clean;
-}
-
-async function requestPairingCodeIfNeeded(sock, state) {
-  try {
-    if (state?.creds?.registered) return;
-
-    const phone = normalizePairingPhone(pairingPhoneNumber);
-
-    if (!isValidPairingPhone(phone)) {
-      pairingMessage = "Masukkan nomor WhatsApp dulu. Contoh: 6281234567890";
-      console.log("PAIRING PHONE BELUM VALID");
-      return;
-    }
-
-    // Kasih jeda sebentar supaya socket siap sebelum request pairing code.
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-
-    if (isConnected) return;
-
-    const code = await sock.requestPairingCode(phone);
-
-    latestPairingCode = formatPairingCode(code);
-    pairingRequestedAt = new Date().toISOString();
-    pairingMessage = "Kode pairing siap. Buka WhatsApp > Perangkat tertaut > Tautkan dengan nomor telepon.";
-
-    latestQR = null;
-
-    console.log("PAIRING CODE SIAP:", latestPairingCode);
-  } catch (err) {
-    pairingMessage = err?.message || "Gagal membuat kode pairing";
-    console.log("PAIRING CODE ERROR:", err?.message);
-  }
-}
-
 function clearReconnectTimer() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -2125,6 +2068,7 @@ async function stopSocket() {
 
   sockInstance = null;
   isConnected = false;
+  isStarting = false;
 
   // Jangan hapus folder session di sini.
   // Stop socket hanya memutus proses sementara, bukan logout WA.
@@ -2157,8 +2101,6 @@ async function startBot() {
     sockInstance = sock;
     isStarting = false;
 
-    requestPairingCodeIfNeeded(sock, state);
-
     sock.ev.on("creds.update", saveCreds);
 
     sock.ev.on("connection.update", async (update) => {
@@ -2170,17 +2112,14 @@ async function startBot() {
       });
 
       if (qr) {
-        // QR sengaja tidak ditampilkan. Login memakai pairing code nomor HP.
-        latestQR = null;
+        latestQR = await QRCode.toDataURL(qr);
         isConnected = false;
-        console.log("QR DIABAIKAN, GUNAKAN PAIRING CODE NOMOR HP");
+        console.log("QR BERHASIL DIGENERATE CEPAT");
       }
 
       if (connection === "open") {
         console.log("WHATSAPP TERHUBUNG");
         latestQR = null;
-        latestPairingCode = null;
-        pairingMessage = "WhatsApp sudah terhubung.";
         isConnected = true;
       }
 
@@ -2188,7 +2127,7 @@ async function startBot() {
         isConnected = false;
 
         const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        const shouldReconnect = botEnabled && statusCode !== DisconnectReason.loggedOut;
 
         console.log("KONEKSI PUTUS");
         console.log("STATUS CODE:", statusCode);
@@ -3208,10 +3147,6 @@ app.get("/status", (req, res) => {
     connected: isConnected,
     enabled: botEnabled,
     hasQR: !!latestQR,
-    pairingCode: latestPairingCode,
-    pairingPhone: pairingPhoneNumber,
-    pairingRequestedAt,
-    pairingMessage,
     starting: isStarting,
     sessionDir: SESSION_DIR,
   });
@@ -3224,10 +3159,6 @@ app.get("/qr-json", (req, res) => {
     connected: isConnected,
     enabled: botEnabled,
     hasQR: !!latestQR,
-    pairingCode: latestPairingCode,
-    pairingPhone: pairingPhoneNumber,
-    pairingRequestedAt,
-    pairingMessage,
     starting: isStarting,
     sessionDir: SESSION_DIR,
   });
@@ -3253,7 +3184,7 @@ app.get("/qr", (req, res) => {
     return res.send(`
       <html>
         <head>
-          <meta http-equiv="refresh" content="3">
+          <meta http-equiv="refresh" content="1">
         </head>
         <body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#07140f;color:white;font-family:sans-serif;text-align:center">
           <div>
@@ -3279,37 +3210,14 @@ app.get("/qr", (req, res) => {
 });
 
 
-app.get("/pairing-code-json", (req, res) => {
-  res.json({
-    success: true,
-    connected: isConnected,
-    enabled: botEnabled,
-    pairingCode: latestPairingCode,
-    pairingPhone: pairingPhoneNumber,
-    pairingRequestedAt,
-    pairingMessage,
-    starting: isStarting,
-    sessionDir: SESSION_DIR,
-  });
-});
-
-app.get("/connect-phone", async (req, res) => {
+app.get("/start", async (req, res) => {
   try {
-    const phone = normalizePairingPhone(req.query.phone || pairingPhoneNumber);
-
-    if (!isValidPairingPhone(phone)) {
-      return res.status(400).json({
-        success: false,
-        message: "Nomor tidak valid. Pakai format 628xxxxxxxxxx atau 08xxxxxxxxxx.",
-      });
-    }
-
+    // START AMAN:
+    // Tidak hapus session dan tidak logout.
+    // Kalau session masih valid, langsung connected.
+    // Kalau session expired, QR baru akan muncul cepat.
     botEnabled = true;
-    pairingPhoneNumber = phone;
-    latestPairingCode = null;
     latestQR = null;
-    pairingRequestedAt = null;
-    pairingMessage = "Sedang membuat kode pairing...";
     isConnected = false;
     isStarting = false;
 
@@ -3319,24 +3227,31 @@ app.get("/connect-phone", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Bot diaktifkan. Tunggu kode pairing muncul beberapa detik.",
-      phone,
+      message: "WA Engine diaktifkan. QR akan muncul otomatis kalau session belum valid.",
+      connected: isConnected,
+      enabled: botEnabled,
+      hasQR: !!latestQR,
+      starting: isStarting,
+      sessionDir: SESSION_DIR,
     });
   } catch (err) {
-    console.log("CONNECT PHONE ERROR:", err?.message);
+    console.log("START ERROR:", err?.message);
+
     res.status(500).json({
       success: false,
-      message: err?.message || "Gagal membuat pairing code",
+      message: err?.message || "Gagal start WA Engine",
     });
   }
 });
 
-app.get("/deactivate", async (req, res) => {
+app.get("/stop", async (req, res) => {
   try {
+    // STOP AMAN:
+    // Hanya mematikan socket sementara.
+    // Session tetap disimpan, jadi aktif lagi tidak perlu QR kalau session masih valid.
     botEnabled = false;
     latestQR = null;
-    latestPairingCode = null;
-    pairingMessage = "Bot nonaktif. Session WhatsApp tetap disimpan, jadi aktif lagi tidak perlu pairing ulang selama session masih valid.";
+    isConnected = false;
     isStarting = false;
 
     clearReconnectTimer();
@@ -3344,13 +3259,44 @@ app.get("/deactivate", async (req, res) => {
 
     res.json({
       success: true,
-      message: pairingMessage,
-      connected: isConnected,
+      message: "WA Engine dinonaktifkan sementara. Session tidak dihapus.",
+      connected: false,
       enabled: botEnabled,
+      hasQR: false,
+      sessionDir: SESSION_DIR,
+    });
+  } catch (err) {
+    console.log("STOP ERROR:", err?.message);
+
+    res.status(500).json({
+      success: false,
+      message: err?.message || "Gagal stop WA Engine",
+    });
+  }
+});
+
+app.get("/deactivate", async (req, res) => {
+  // Alias lama supaya tombol dashboard lama tetap aman.
+  try {
+    botEnabled = false;
+    latestQR = null;
+    isConnected = false;
+    isStarting = false;
+
+    clearReconnectTimer();
+    await stopSocket();
+
+    res.json({
+      success: true,
+      message: "WA Engine dinonaktifkan sementara. Session tidak dihapus.",
+      connected: false,
+      enabled: botEnabled,
+      hasQR: false,
       sessionDir: SESSION_DIR,
     });
   } catch (err) {
     console.log("DEACTIVATE ERROR:", err?.message);
+
     res.status(500).json({
       success: false,
       message: err?.message || "Gagal nonaktifkan bot",
@@ -3364,22 +3310,20 @@ app.get("/connect", async (req, res) => {
     // Tidak menghapus session, jadi aman dipakai setelah update/redeploy.
     botEnabled = true;
     latestQR = null;
-    latestPairingCode = null;
-    pairingMessage = pairingPhoneNumber
-      ? "Sedang membuat kode pairing..."
-      : "Bot diaktifkan. Jika belum login, gunakan /connect-phone?phone=628xxxx.";
     isConnected = false;
     isStarting = false;
 
     clearReconnectTimer();
-
     await stopSocket();
-
     startBot();
 
     res.json({
       success: true,
       message: "WA Engine direstart aman tanpa menghapus session",
+      connected: isConnected,
+      enabled: botEnabled,
+      hasQR: !!latestQR,
+      starting: isStarting,
       sessionDir: SESSION_DIR,
     });
   } catch (err) {
@@ -3396,14 +3340,12 @@ app.get("/reset-session", async (req, res) => {
   try {
     // RESET SESSION:
     // Pakai ini hanya kalau memang mau logout total dan scan QR ulang.
+    botEnabled = true;
     latestQR = null;
-    latestPairingCode = null;
-    pairingMessage = "";
     isConnected = false;
     isStarting = false;
 
     clearReconnectTimer();
-
     await stopSocket();
 
     await fs.promises.rm(SESSION_DIR, {
@@ -3416,6 +3358,9 @@ app.get("/reset-session", async (req, res) => {
     res.json({
       success: true,
       message: "Session lama dihapus, QR baru akan dibuat",
+      connected: isConnected,
+      enabled: botEnabled,
+      hasQR: !!latestQR,
       sessionDir: SESSION_DIR,
     });
   } catch (err) {
