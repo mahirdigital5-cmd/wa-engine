@@ -3536,11 +3536,49 @@ async function startBot() {
   }
 }
 
+async function ensureBotRunningForQr(forceRestart = false) {
+  if (isConnected) return;
+
+  try {
+    clearReconnectTimer();
+
+    if (forceRestart) {
+      latestQR = null;
+      isConnected = false;
+      isStarting = false;
+
+      await stopSocket();
+      startBot();
+      return;
+    }
+
+    if (isStarting) return;
+
+    if (!sockInstance || !latestQR) {
+      await stopSocket();
+      startBot();
+    }
+  } catch (err) {
+    console.log("ENSURE BOT RUNNING ERROR:", err?.message);
+  }
+}
+
 app.get("/", (req, res) => {
-  res.send("ChatBotNexis WA Engine Aktif");
+  res.json({
+    success: true,
+    message: "ChatBotNexis WA Engine Aktif",
+    connected: isConnected,
+    hasQR: !!latestQR,
+    starting: isStarting,
+    sessionDir: SESSION_DIR,
+  });
 });
 
-app.get("/status", (req, res) => {
+app.get("/status", async (req, res) => {
+  await ensureBotRunningForQr(false);
+
+  res.setHeader("Cache-Control", "no-store");
+
   res.json({
     success: true,
     connected: isConnected,
@@ -3550,7 +3588,13 @@ app.get("/status", (req, res) => {
   });
 });
 
-app.get("/qr-json", (req, res) => {
+app.get("/qr-json", async (req, res) => {
+  await ensureBotRunningForQr(false);
+
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+
   res.json({
     success: true,
     qr: latestQR,
@@ -3558,11 +3602,17 @@ app.get("/qr-json", (req, res) => {
     hasQR: !!latestQR,
     starting: isStarting,
     sessionDir: SESSION_DIR,
+    time: Date.now(),
   });
 });
 
-app.get("/qr", (req, res) => {
+app.get("/qr", async (req, res) => {
+  await ensureBotRunningForQr(false);
+
   res.setHeader("Content-Type", "text/html");
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
 
   if (isConnected) {
     return res.send(`
@@ -3581,12 +3631,13 @@ app.get("/qr", (req, res) => {
     return res.send(`
       <html>
         <head>
-          <meta http-equiv="refresh" content="3">
+          <meta http-equiv="refresh" content="1">
         </head>
         <body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#07140f;color:white;font-family:sans-serif;text-align:center">
           <div>
-            <h2>QR sedang dibuat...</h2>
-            <p>Tunggu beberapa detik. Halaman ini refresh otomatis.</p>
+            <h2>QR sedang dibuat</h2>
+            <p>Tunggu sebentar. Halaman ini refresh otomatis.</p>
+            <p style="opacity:.65;font-size:13px">starting: ${isStarting ? "ya" : "tidak"}</p>
           </div>
         </body>
       </html>
@@ -3595,6 +3646,9 @@ app.get("/qr", (req, res) => {
 
   res.send(`
     <html>
+      <head>
+        <meta http-equiv="Cache-Control" content="no-store" />
+      </head>
       <body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#07140f;color:white;font-family:sans-serif;text-align:center">
         <div>
           <h2>Scan QR WhatsApp</h2>
@@ -3608,21 +3662,14 @@ app.get("/qr", (req, res) => {
 
 app.get("/connect", async (req, res) => {
   try {
-    // SAFE CONNECT:
-    // Tidak menghapus session, jadi aman dipakai setelah update/redeploy.
-    latestQR = null;
-    isConnected = false;
-    isStarting = false;
-
-    clearReconnectTimer();
-
-    await stopSocket();
-
-    startBot();
+    await ensureBotRunningForQr(true);
 
     res.json({
       success: true,
       message: "WA Engine direstart aman tanpa menghapus session",
+      connected: isConnected,
+      hasQR: !!latestQR,
+      starting: isStarting,
       sessionDir: SESSION_DIR,
     });
   } catch (err) {
@@ -3637,8 +3684,6 @@ app.get("/connect", async (req, res) => {
 
 app.get("/reset-session", async (req, res) => {
   try {
-    // RESET SESSION:
-    // Pakai ini hanya kalau memang mau logout total dan scan QR ulang.
     latestQR = null;
     isConnected = false;
     isStarting = false;
@@ -3657,6 +3702,9 @@ app.get("/reset-session", async (req, res) => {
     res.json({
       success: true,
       message: "Session lama dihapus, QR baru akan dibuat",
+      connected: isConnected,
+      hasQR: !!latestQR,
+      starting: isStarting,
       sessionDir: SESSION_DIR,
     });
   } catch (err) {
@@ -3670,12 +3718,12 @@ app.get("/reset-session", async (req, res) => {
 });
 
 app.get("/reload", async (req, res) => {
-  // Trigger/flow/checkout dibaca langsung dari API setiap ada pesan masuk,
-  // jadi update template di dashboard tidak perlu restart engine.
   res.json({
     success: true,
     message: "Template dibaca live dari API. Tidak perlu restart untuk update trigger/flow/checkout.",
     connected: isConnected,
+    hasQR: !!latestQR,
+    starting: isStarting,
     sessionDir: SESSION_DIR,
   });
 });
@@ -3701,15 +3749,22 @@ app.get("/logout", async (req, res) => {
 
     res.json({
       success: true,
-      message: "WhatsApp berhasil logout",
+      message: "WhatsApp berhasil logout. Klik connect/reset-session untuk QR baru.",
+      connected: false,
+      hasQR: false,
+      starting: false,
+      sessionDir: SESSION_DIR,
     });
   } catch (err) {
+    console.log("LOGOUT ERROR:", err?.message);
+
     res.status(500).json({
       success: false,
       message: err?.message || "Gagal logout",
     });
   }
 });
+
 
 const PORT = process.env.PORT || 3000;
 
