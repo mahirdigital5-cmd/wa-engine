@@ -925,21 +925,53 @@ function formatRupiah(value) {
   return `Rp ${number.toLocaleString("id-ID")}`;
 }
 
-function getFlowCheckout(flows, flowId) {
-  const flow = (flows || []).find((item) => String(item.id) === String(flowId));
+function isCheckoutEnabled(value) {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
+function normalizeCheckoutFromFlow(flow) {
   const checkout = parseJsonMaybe(flow?.checkout, {});
 
-  if (checkout?.enabled !== true) return null;
+  if (!isCheckoutEnabled(checkout?.enabled)) return null;
 
   return {
     enabled: true,
+    flowId: flow?.id || null,
     productName: checkout.productName || flow?.name || "Produk",
-    price1: Number(checkout.price1) || 0,
-    price2: Number(checkout.price2) || 0,
-    priceExtra: Number(checkout.priceExtra) || 0,
-    defaultShipping: Number(checkout.defaultShipping) || 0,
+    price1: toCheckoutNumber(checkout.price1, 0),
+    price2: toCheckoutNumber(checkout.price2, 0),
+    priceExtra: toCheckoutNumber(checkout.priceExtra, 0),
+    defaultShipping: toCheckoutNumber(checkout.defaultShipping, 0),
     shippingByArea: checkout.shippingByArea || {},
   };
+}
+
+function getFlowCheckout(flows, flowId) {
+  const flow = (flows || []).find((item) => String(item.id) === String(flowId));
+  return normalizeCheckoutFromFlow(flow);
+}
+
+function getFirstEnabledCheckout(flows = []) {
+  for (const flow of flows || []) {
+    const checkout = normalizeCheckoutFromFlow(flow);
+    if (checkout) return checkout;
+  }
+
+  return null;
+}
+
+function getCheckoutForTrigger(found = {}, flows = [], session = null) {
+  // Prioritas 1: checkout dari flow trigger yang sedang membalas.
+  const triggerCheckout = getFlowCheckout(flows, found?.flow_id);
+  if (triggerCheckout) return triggerCheckout;
+
+  // Prioritas 2: checkout dari flow aktif di session customer.
+  const sessionCheckout = getFlowCheckout(flows, session?.flow_id);
+  if (sessionCheckout) return sessionCheckout;
+
+  // Prioritas 3: checkout pertama yang aktif, supaya [total] tetap jalan
+  // walaupun trigger [qty] tidak sengaja dibuat di flow yang berbeda.
+  return getFirstEnabledCheckout(flows);
 }
 
 function isAffirmative(text) {
@@ -1259,16 +1291,26 @@ function extractQty(text) {
   return null;
 }
 
+function toCheckoutNumber(value, fallback = 0) {
+  const cleaned = String(value ?? "")
+    .replace(/[^0-9.-]/g, "")
+    .trim();
+
+  const number = Number(cleaned);
+  return Number.isFinite(number) ? number : fallback;
+}
+
 function calculateProductPrice(checkout, qty) {
-  const quantity = Number(qty) || 1;
+  const quantity = Math.max(1, Math.floor(toCheckoutNumber(qty, 1)));
 
-  if (quantity <= 1) return checkout.price1;
-  if (quantity === 2) return checkout.price2 || checkout.price1 * 2;
+  const price1 = toCheckoutNumber(checkout?.price1, 0);
+  const price2 = toCheckoutNumber(checkout?.price2, price1 * 2);
+  const priceExtra = toCheckoutNumber(checkout?.priceExtra, price1);
 
-  const baseTwo = checkout.price2 || checkout.price1 * 2;
-  const extra = checkout.priceExtra || checkout.price1;
+  if (quantity <= 1) return price1;
+  if (quantity === 2) return price2;
 
-  return baseTwo + (quantity - 2) * extra;
+  return price2 + (quantity - 2) * priceExtra;
 }
 
 function extractArea(text, checkout) {
@@ -1277,18 +1319,24 @@ function extractArea(text, checkout) {
 }
 function getShippingPrice(checkout, area) {
   const shippingByArea = checkout?.shippingByArea || {};
-  const normalizedArea = normalizeText(area);
+  const normalizedArea = normalizeLocationText(area);
+  const defaultShipping = toCheckoutNumber(checkout?.defaultShipping, 0);
 
   for (const [key, value] of Object.entries(shippingByArea)) {
+    const normalizedKey = normalizeLocationText(key);
+
+    if (!normalizedKey) continue;
+
     if (
-      normalizeText(key) === normalizedArea ||
-      normalizedArea.includes(normalizeText(key))
+      normalizedKey === normalizedArea ||
+      normalizedArea.includes(normalizedKey) ||
+      normalizedKey.includes(normalizedArea)
     ) {
-      return Number(value) || checkout.defaultShipping || 0;
+      return toCheckoutNumber(value, defaultShipping);
     }
   }
 
-  return checkout.defaultShipping || 0;
+  return defaultShipping;
 }
 
 function getCheckoutTotal(checkout, qty, area) {
@@ -3475,7 +3523,7 @@ async function startBot() {
 
         for (const found of foundList) {
           const mediaList = getMediaList(found);
-          const triggerCheckout = getFlowCheckout(flows, found.flow_id);
+          const triggerCheckout = getCheckoutForTrigger(found, flows, session);
 
           const checkoutStateForTrigger = buildCheckoutStateForTrigger(
             text,
@@ -3485,6 +3533,23 @@ async function startBot() {
 
           if (triggerCheckout) {
             await saveCheckoutState(phone, session, checkoutStateForTrigger);
+
+            console.log("CHECKOUT TOTAL DEBUG:", {
+              flowId: triggerCheckout.flowId,
+              productName: triggerCheckout.productName,
+              qty: checkoutStateForTrigger.qty,
+              area: checkoutStateForTrigger.area,
+              price1: triggerCheckout.price1,
+              price2: triggerCheckout.price2,
+              priceExtra: triggerCheckout.priceExtra,
+              defaultShipping: triggerCheckout.defaultShipping,
+              shippingByArea: triggerCheckout.shippingByArea,
+              total: getCheckoutTotal(
+                triggerCheckout,
+                checkoutStateForTrigger.qty,
+                checkoutStateForTrigger.area
+              ),
+            });
           }
 
           const responseParts = getResponseParts(found.response).map((part) =>
