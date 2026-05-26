@@ -436,6 +436,7 @@ function keywordHasQtyPlaceholder(keyword = "") {
 
 function isQtyQuestion(text = "") {
   const normalized = normalizeText(text);
+  const words = normalized.split(" ").filter(Boolean);
 
   const qtyWords = [
     "pcs",
@@ -452,12 +453,26 @@ function isQtyQuestion(text = "") {
     "beli",
     "mau",
     "paket",
+    "piece",
+    "pieces",
   ];
 
-  const hasQtyWord = qtyWords.some((word) => normalized.includes(word));
-  const hasNumber = /\b\d{1,2}\b/.test(normalized);
-  const hasWordNumber = [
+  const priceWords = [
+    "berapa",
+    "berapanya",
+    "harga",
+    "harganya",
+    "jadi",
+    "total",
+    "ongkir",
+    "ongkirnya",
+    "semua",
+  ];
+
+  const wordNumbers = [
     "satu",
+    "sebiji",
+    "sebuah",
     "dua",
     "tiga",
     "empat",
@@ -467,9 +482,24 @@ function isQtyQuestion(text = "") {
     "delapan",
     "sembilan",
     "sepuluh",
-  ].some((word) => normalized.split(" ").includes(word));
+    "sebelas",
+    "duabelas",
+    "dua belas",
+  ];
 
-  return hasQtyWord && (hasNumber || hasWordNumber);
+  const hasQtyWord = qtyWords.some((word) => words.includes(word));
+  const hasPriceWord = priceWords.some((word) => words.includes(word));
+  const hasNumber = /\b\d{1,2}\b/.test(normalized);
+  const hasWordNumber = wordNumbers.some((word) => normalized.includes(word));
+
+  // Support pertanyaan pendek:
+  // "kalo 3 brpa ka", "2 jadi berapa", "tiga jadi berapa", "dua ongkirnya berapa"
+  const hasQtyPricePattern =
+    /\b(kalo|kalau|jika|jadi|total)\b/.test(normalized) &&
+    (hasNumber || hasWordNumber) &&
+    hasPriceWord;
+
+  return (hasQtyWord && (hasNumber || hasWordNumber)) || hasQtyPricePattern;
 }
 
 function matchQtyPlaceholderKeyword(text = "", keyword = "") {
@@ -1064,6 +1094,18 @@ function extractQty(text) {
     "pieces",
   ];
 
+  const priceIntentWords = [
+    "berapa",
+    "berapanya",
+    "harga",
+    "harganya",
+    "jadi",
+    "total",
+    "semua",
+    "ongkir",
+    "ongkirnya",
+  ];
+
   const addressWords = [
     "jl",
     "jalan",
@@ -1108,9 +1150,9 @@ function extractQty(text) {
     words.includes(word) || normalized.includes(` ${word} `)
   );
 
-  const hasAddressIntent = addressWords.some((word) =>
-    words.includes(word)
-  );
+  const hasPriceIntent = priceIntentWords.some((word) => words.includes(word));
+
+  const hasAddressIntent = addressWords.some((word) => words.includes(word));
 
   // Kalau chat terlihat seperti alamat dan tidak ada niat jumlah,
   // jangan ambil angka alamat seperti No. 54 / RT 29 / RW 05 sebagai qty.
@@ -1129,6 +1171,8 @@ function extractQty(text) {
     const cleaned = normalizeText(value);
     if (wordMap[cleaned]) return wordMap[cleaned];
 
+    if (cleaned.includes("dua belas")) return 12;
+
     const tokenList = cleaned.split(" ").filter(Boolean);
     for (const token of tokenList) {
       if (wordMap[token]) return wordMap[token];
@@ -1138,17 +1182,12 @@ function extractQty(text) {
   }
 
   // Pola paling aman: angka dekat kata qty.
-  // Support:
-  // - "2 pcs", "3 biji", "4 unit"
-  // - "pcs 2", "qty 3"
-  // - "beli 2", "mau 3", "ambil 4", "order 5"
-  // - "beli dua", "mau tiga pcs"
   const quantityPatterns = [
     /\b(\d{1,2})\s*(pcs|pc|biji|buah|unit|paket|piece|pieces)\b/i,
     /\b(pcs|pc|biji|buah|unit|paket|piece|pieces|qty|jumlah)\s*(\d{1,2})\b/i,
     /\b(qty|jumlah|pesan|pesen|order|ambil|beli|buy|mau)\s*(?:nya\s*)?(\d{1,2})\b/i,
     /\b(\d{1,2})\s*(qty|jumlah)\b/i,
-    /\b(\d{1,2})\s*(brp|berapa)\b/i,
+    /\b(\d{1,2})\s*(brp|brpa|brapa|berapa|berapanya)\b/i,
   ];
 
   for (const pattern of quantityPatterns) {
@@ -1167,12 +1206,14 @@ function extractQty(text) {
   // Support:
   // - "3 berapa kak"
   // - "kalo 3 brpa ka"
+  // - "kalo 2 jadi brpa ka ongkirnya"
   // - "kalau beli 3 berapa"
   // - "jika ambil 4 berapanya"
-  // Pakai normalized supaya typo brp/brpa/brapa tetap jadi "berapa".
   const normalizedQtyPricePatterns = [
-    /\b(\d{1,2})\s*(berapa|berapanya)\b/i,
-    /\b(kalo|kalau|jika|kalau\s+mau|kalo\s+mau)\s*(?:beli|ambil|pesan|pesen|order|mau)?\s*(\d{1,2})\b/i,
+    /\b(\d{1,2})\s*(berapa|berapanya|jadi|total|ongkir|ongkirnya)\b/i,
+    /\b(kalo|kalau|jika)\s*(?:beli|ambil|pesan|pesen|order|mau)?\s*(\d{1,2})\b/i,
+    /\b(kalo|kalau|jika)\s*(?:beli|ambil|pesan|pesen|order|mau)?\s*(satu|sebiji|sebuah|dua|tiga|empat|lima|enam|tujuh|delapan|sembilan|sepuluh|sebelas|dua belas|duabelas)\b/i,
+    /\b(satu|sebiji|sebuah|dua|tiga|empat|lima|enam|tujuh|delapan|sembilan|sepuluh|sebelas|dua belas|duabelas)\s*(berapa|berapanya|jadi|total|ongkir|ongkirnya)\b/i,
   ];
 
   if (!looksLikeAddress(raw)) {
@@ -1184,8 +1225,11 @@ function extractQty(text) {
         .slice(1)
         .find((item) => /^\d{1,2}$/.test(String(item || "")));
 
-      const qty = validQty(numberCandidate);
-      if (qty !== null) return qty;
+      const numberQty = validQty(numberCandidate);
+      if (numberQty !== null) return numberQty;
+
+      const wordQty = wordToQty(match.slice(1).join(" "));
+      if (wordQty !== null) return wordQty;
     }
   }
 
@@ -1202,10 +1246,8 @@ function extractQty(text) {
     if (qty !== null) return qty;
   }
 
-  // Fallback khusus: kalau ada niat jumlah, ambil angka kecil pertama
-  // yang bukan bagian dari alamat panjang.
-  // Contoh: "kalau beli 3 berapa kak" => 3.
-  if (hasQuantityIntent) {
+  // Fallback khusus: kalau ada niat jumlah / harga total, ambil angka kecil pertama.
+  if (hasQuantityIntent || hasPriceIntent) {
     const numberMatch = normalized.match(/\b\d{1,2}\b/);
     const qty = validQty(numberMatch?.[0]);
     if (qty !== null) return qty;
@@ -1369,6 +1411,122 @@ async function saveCheckoutState(phone, session, nextState = {}) {
   await updateSessionCheckout(phone, merged);
 
   return merged;
+}
+
+
+function isCheckoutQtyTotalQuestion(text = "") {
+  const normalized = normalizeText(text);
+
+  const hasQty = extractQty(text) !== null || isQtyQuestion(text);
+  const asksTotal =
+    normalized.includes("berapa") ||
+    normalized.includes("berapanya") ||
+    normalized.includes("harga") ||
+    normalized.includes("harganya") ||
+    normalized.includes("jadi") ||
+    normalized.includes("total") ||
+    normalized.includes("ongkir") ||
+    normalized.includes("ongkirnya");
+
+  return hasQty && asksTotal;
+}
+
+function normalizeCheckoutAreaCandidate(value = "") {
+  return cleanLocationReplyText(value)
+    .replace(/\b(kalo|kalau|jika|jadi|total|berapa|berapanya|harga|harganya|ongkir|ongkirnya|pcs|pc|biji|buah|unit|qty|jumlah|pesan|pesen|order|ambil|beli|mau)\b/g, " ")
+    .replace(/\d+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isValidCheckoutAreaCandidate(value = "") {
+  const cleaned = normalizeCheckoutAreaCandidate(value);
+  if (!cleaned) return false;
+
+  const words = cleaned.split(" ").filter(Boolean);
+
+  const blocked = [
+    "ka",
+    "kak",
+    "kaka",
+    "min",
+    "admin",
+    "gan",
+    "sis",
+    "mas",
+    "mba",
+    "mbak",
+    "bang",
+    "bos",
+    "ya",
+    "yah",
+    "dong",
+    "oke",
+    "ok",
+    "sip",
+  ];
+
+  if (words.length === 0) return false;
+  if (words.every((word) => blocked.includes(word))) return false;
+  if (words.length === 1 && blocked.includes(words[0])) return false;
+
+  return true;
+}
+
+function getSafeIncomingLocationForCheckout(text = "", checkout = null, previousState = {}) {
+  const empty = { area: "", kecamatan: "", kota_kabupaten: "", kota: "", kabupaten: "" };
+  const normalized = normalizeLocationText(text);
+  const shippingByArea = checkout?.shippingByArea || {};
+
+  // Prioritas 1: kalau teks mengandung area yang memang ada di setting checkout,
+  // pakai area tersebut.
+  for (const area of Object.keys(shippingByArea)) {
+    const areaNorm = normalizeLocationText(area);
+    if (areaNorm && normalized.includes(areaNorm)) {
+      return splitKnownAreaToLocationParts(area);
+    }
+  }
+
+  // Kalau ini pertanyaan qty/total saja, jangan paksa extract lokasi.
+  // Ini mencegah "kalo 2 jadi brpa ka ongkirnya" membuat area berubah jadi "Ka".
+  if (isCheckoutQtyTotalQuestion(text)) {
+    return empty;
+  }
+
+  const parts = checkout ? extractLocationParts(text, checkout) : extractLocationParts(text, null);
+
+  if (!isValidCheckoutAreaCandidate(parts.area)) {
+    return empty;
+  }
+
+  return parts;
+}
+
+function buildCheckoutStateForTrigger(text = "", checkout = null, session = null) {
+  const previousCheckoutState = getSessionCheckoutState(session);
+
+  const incomingQty = extractQty(text);
+  const incomingLocation = getSafeIncomingLocationForCheckout(
+    text,
+    checkout,
+    previousCheckoutState
+  );
+
+  const incomingArea = incomingLocation.area || "";
+  const incomingName = extractName(text);
+  const incomingAddress = looksLikeAddress(text) ? cleanAddressText(text) : "";
+
+  return {
+    ...previousCheckoutState,
+    qty: incomingQty || Number(previousCheckoutState.qty) || 1,
+    area: incomingArea || previousCheckoutState.area || "",
+    kecamatan: incomingLocation.kecamatan || previousCheckoutState.kecamatan || "",
+    kota_kabupaten: incomingLocation.kota_kabupaten || previousCheckoutState.kota_kabupaten || "",
+    kota: incomingLocation.kota || previousCheckoutState.kota || "",
+    kabupaten: incomingLocation.kabupaten || previousCheckoutState.kabupaten || "",
+    address: incomingAddress || previousCheckoutState.address || "",
+    name: incomingName || previousCheckoutState.name || "",
+  };
 }
 
 async function handleCheckoutMessage(sock, jid, text, session, flows) {
@@ -3318,27 +3476,12 @@ async function startBot() {
         for (const found of foundList) {
           const mediaList = getMediaList(found);
           const triggerCheckout = getFlowCheckout(flows, found.flow_id);
-          const previousCheckoutState = getSessionCheckoutState(session);
 
-          const incomingQty = extractQty(text);
-          const incomingLocation = triggerCheckout
-            ? extractLocationParts(text, triggerCheckout)
-            : extractLocationParts(text, null);
-          const incomingArea = incomingLocation.area || "";
-          const incomingName = extractName(text);
-          const incomingAddress = cleanAddressText(text);
-
-          const checkoutStateForTrigger = {
-            ...previousCheckoutState,
-            qty: incomingQty || Number(previousCheckoutState.qty) || 1,
-            area: incomingArea || previousCheckoutState.area || "",
-            kecamatan: incomingLocation.kecamatan || previousCheckoutState.kecamatan || "",
-            kota_kabupaten: incomingLocation.kota_kabupaten || previousCheckoutState.kota_kabupaten || "",
-            kota: incomingLocation.kota || previousCheckoutState.kota || "",
-            kabupaten: incomingLocation.kabupaten || previousCheckoutState.kabupaten || "",
-            address: incomingAddress || previousCheckoutState.address || "",
-            name: incomingName || previousCheckoutState.name || "",
-          };
+          const checkoutStateForTrigger = buildCheckoutStateForTrigger(
+            text,
+            triggerCheckout,
+            session
+          );
 
           if (triggerCheckout) {
             await saveCheckoutState(phone, session, checkoutStateForTrigger);
